@@ -3,6 +3,7 @@ package outboundgroup
 import (
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/Dreamacro/clash/adapter/outbound"
 	"github.com/Dreamacro/clash/adapter/provider"
@@ -29,6 +30,7 @@ type GroupCommonOption struct {
 	Interval   int      `group:"interval,omitempty"`
 	Lazy       bool     `group:"lazy,omitempty"`
 	DisableUDP bool     `group:"disable-udp,omitempty"`
+	Filter     string   `group:"filter,omitempty"`
 }
 
 func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]types.ProxyProvider) (C.ProxyAdapter, error) {
@@ -45,6 +47,15 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		return nil, errFormat
 	}
 
+	var filterReg *regexp.Regexp
+	if groupOption.Filter != "" {
+		f, err := regexp.Compile(groupOption.Filter)
+		if err != nil {
+			return nil, fmt.Errorf("invalid filter regex: %w", err)
+		}
+		filterReg = f
+	}
+
 	groupName := groupOption.Name
 
 	providers := []types.ProxyProvider{}
@@ -54,43 +65,45 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	}
 
 	if len(groupOption.Proxies) != 0 {
-		ps, err := getProxies(proxyMap, groupOption.Proxies)
+		ps, err := getProxies(proxyMap, groupOption.Proxies, filterReg)
 		if err != nil {
 			return nil, err
 		}
 
-		if _, ok := providersMap[groupName]; ok {
-			return nil, errDuplicateProvider
-		}
-
-		// select don't need health check
-		if groupOption.Type == "select" || groupOption.Type == "relay" {
-			hc := provider.NewHealthCheck(ps, "", 0, true)
-			pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
-			if err != nil {
-				return nil, err
+		if len(ps) != 0 {
+			if _, ok := providersMap[groupName]; ok {
+				return nil, errDuplicateProvider
 			}
 
-			providers = append(providers, pd)
-			providersMap[groupName] = pd
-		} else {
-			if groupOption.URL == "" || groupOption.Interval == 0 {
-				return nil, errMissHealthCheck
-			}
+			// select don't need health check
+			if groupOption.Type == "select" || groupOption.Type == "relay" {
+				hc := provider.NewHealthCheck(ps, "", 0, true)
+				pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
+				if err != nil {
+					return nil, err
+				}
 
-			hc := provider.NewHealthCheck(ps, groupOption.URL, uint(groupOption.Interval), groupOption.Lazy)
-			pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
-			if err != nil {
-				return nil, err
-			}
+				providers = append(providers, pd)
+				providersMap[groupName] = pd
+			} else {
+				if groupOption.URL == "" || groupOption.Interval == 0 {
+					return nil, errMissHealthCheck
+				}
 
-			providers = append(providers, pd)
-			providersMap[groupName] = pd
+				hc := provider.NewHealthCheck(ps, groupOption.URL, uint(groupOption.Interval), groupOption.Lazy)
+				pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
+				if err != nil {
+					return nil, err
+				}
+
+				providers = append(providers, pd)
+				providersMap[groupName] = pd
+			}
 		}
 	}
 
 	if len(groupOption.Use) != 0 {
-		list, err := getProviders(providersMap, groupOption.Use)
+		list, err := getProviders(providersMap, groupOption, filterReg)
 		if err != nil {
 			return nil, err
 		}
@@ -118,30 +131,53 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	return group, nil
 }
 
-func getProxies(mapping map[string]C.Proxy, list []string) ([]C.Proxy, error) {
+func getProxies(mapping map[string]C.Proxy, list []string, filterReg *regexp.Regexp) ([]C.Proxy, error) {
 	var ps []C.Proxy
 	for _, name := range list {
 		p, ok := mapping[name]
 		if !ok {
 			return nil, fmt.Errorf("'%s' not found", name)
 		}
+		if filterReg != nil && !filterReg.MatchString(p.Name()) {
+			continue
+		}
 		ps = append(ps, p)
 	}
 	return ps, nil
 }
 
-func getProviders(mapping map[string]types.ProxyProvider, list []string) ([]types.ProxyProvider, error) {
+func getProviders(mapping map[string]types.ProxyProvider, groupOption *GroupCommonOption, filterReg *regexp.Regexp) ([]types.ProxyProvider, error) {
 	var ps []types.ProxyProvider
-	for _, name := range list {
+	for _, name := range groupOption.Use {
 		p, ok := mapping[name]
 		if !ok {
 			return nil, fmt.Errorf("'%s' not found", name)
 		}
 
-		if p.VehicleType() == types.Compatible {
+		var pp *provider.ProxySetProvider
+		if pp, ok = p.(*provider.ProxySetProvider); !ok {
 			return nil, fmt.Errorf("proxy group %s can't contains in `use`", name)
 		}
-		ps = append(ps, p)
+
+		var hc *provider.HealthCheck
+		// select and relay don't need health check
+		if groupOption.Type == "select" || groupOption.Type == "relay" {
+			hc = provider.NewHealthCheck([]C.Proxy{}, "", 0, true)
+		} else {
+			if groupOption.URL == "" || groupOption.Interval == 0 {
+				return nil, errMissHealthCheck
+			}
+			hc = provider.NewHealthCheck([]C.Proxy{}, groupOption.URL, uint(groupOption.Interval), groupOption.Lazy)
+		}
+
+		fpName := fmt.Sprintf("%s-in-%s", name, groupOption.Name)
+		fp, err := provider.NewFilterableProvider(fpName, pp, hc, filterReg)
+		if err != nil {
+			return nil, err
+		}
+
+		pp.AddChild(fp)
+		ps = append(ps, fp)
 	}
 	return ps, nil
 }

@@ -3,9 +3,13 @@ package outboundgroup
 import (
 	"time"
 
+	"github.com/Dreamacro/clash/adapter"
+	"github.com/Dreamacro/clash/adapter/outbound"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/constant/provider"
 )
+
+var fallbackProxyForEmptyProxyGroup = adapter.NewProxy(outbound.NewReject())
 
 const (
 	defaultGetProxiesDuration = time.Second * 5
@@ -24,6 +28,11 @@ func getProvidersProxies(providers []provider.ProxyProvider, touch bool) []C.Pro
 			provider.Touch()
 		}
 		proxies = append(proxies, provider.Proxies()...)
+	}
+
+	// allow empty filterable proxy provider, add a fallback proxy to empty proxy group.
+	if len(proxies) == 0 {
+		proxies = append(proxies, fallbackProxyForEmptyProxyGroup)
 	}
 	return proxies
 }

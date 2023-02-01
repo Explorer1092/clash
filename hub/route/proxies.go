@@ -11,6 +11,7 @@ import (
 	"github.com/Dreamacro/clash/adapter/outboundgroup"
 	"github.com/Dreamacro/clash/component/profile/cachefile"
 	C "github.com/Dreamacro/clash/constant"
+	"github.com/Dreamacro/clash/constant/provider"
 	"github.com/Dreamacro/clash/tunnel"
 
 	"github.com/go-chi/chi/v5"
@@ -43,10 +44,28 @@ func findProxyByName(next http.Handler) http.Handler {
 		name := r.Context().Value(CtxKeyProxyName).(string)
 		proxies := tunnel.Proxies()
 		proxy, exist := proxies[name]
+
+		// search in file proxy provider and http proxy provider
+		// e.g., used to perform delay checks on filterable proxy provider in proxy group
 		if !exist {
-			render.Status(r, http.StatusNotFound)
-			render.JSON(w, r, ErrNotFound)
-			return
+			providers := tunnel.Providers()
+		loop:
+			for _, pd := range providers {
+				if pd.VehicleType() == provider.Compatible {
+					continue
+				}
+				for _, p := range pd.Proxies() {
+					if exist = p.Name() == name; exist {
+						proxy = p
+						break loop
+					}
+				}
+			}
+			if !exist {
+				render.Status(r, http.StatusNotFound)
+				render.JSON(w, r, ErrNotFound)
+				return
+			}
 		}
 
 		ctx := context.WithValue(r.Context(), CtxKeyProxy, proxy)

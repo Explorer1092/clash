@@ -32,6 +32,7 @@ type proxySetProvider struct {
 	*fetcher
 	proxies     []C.Proxy
 	healthCheck *HealthCheck
+	children    []*FilterableProvider
 }
 
 func (pp *proxySetProvider) MarshalJSON() ([]byte, error) {
@@ -82,11 +83,20 @@ func (pp *proxySetProvider) Touch() {
 	pp.healthCheck.touch()
 }
 
+func (pp *proxySetProvider) AddChild(child *FilterableProvider) {
+	pp.children = append(pp.children, child)
+}
+
 func (pp *proxySetProvider) setProxies(proxies []C.Proxy) {
 	pp.proxies = proxies
 	pp.healthCheck.setProxy(proxies)
 	if pp.healthCheck.auto() {
 		go pp.healthCheck.check()
+	}
+
+	// update filterable proxy provider in proxy group
+	for _, child := range pp.children {
+		_ = child.Update()
 	}
 }
 
@@ -229,5 +239,101 @@ func NewCompatibleProvider(name string, proxies []C.Proxy, hc *HealthCheck) (*Co
 
 	wrapper := &CompatibleProvider{pd}
 	runtime.SetFinalizer(wrapper, stopCompatibleProvider)
+	return wrapper, nil
+}
+
+// FilterableProvider for auto gc
+type FilterableProvider struct {
+	*filterableProvider
+}
+
+type filterableProvider struct {
+	name        string
+	parent      *ProxySetProvider
+	healthCheck *HealthCheck
+	proxies     []C.Proxy
+	filterReg   *regexp.Regexp
+}
+
+func (fp *filterableProvider) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"name":        fp.Name(),
+		"type":        fp.Type().String(),
+		"vehicleType": fp.VehicleType().String(),
+		"proxies":     fp.Proxies(),
+	})
+}
+
+func (fp *filterableProvider) Name() string {
+	return fp.name
+}
+
+func (fp *filterableProvider) HealthCheck() {
+	fp.healthCheck.check()
+}
+
+func (fp *filterableProvider) Update() error {
+	proxies := []C.Proxy{}
+	if fp.filterReg != nil {
+		for _, proxy := range fp.parent.Proxies() {
+			if !fp.filterReg.MatchString(proxy.Name()) {
+				continue
+			}
+			proxies = append(proxies, proxy)
+		}
+	} else {
+		proxies = fp.parent.Proxies()
+	}
+
+	// allow empty
+	fp.proxies = proxies
+	fp.healthCheck.setProxy(proxies)
+
+	if fp.healthCheck.auto() {
+		go fp.healthCheck.check()
+	}
+	return nil
+}
+
+func (fp *filterableProvider) Initial() error {
+	return nil
+}
+
+func (fp *filterableProvider) VehicleType() types.VehicleType {
+	return types.Compatible
+}
+
+func (fp *filterableProvider) Type() types.ProviderType {
+	return types.Proxy
+}
+
+func (fp *filterableProvider) Proxies() []C.Proxy {
+	return fp.proxies
+}
+
+func (fp *filterableProvider) Touch() {
+	fp.healthCheck.touch()
+}
+
+func stopFilterableProvider(pd *FilterableProvider) {
+	pd.healthCheck.close()
+}
+
+func NewFilterableProvider(name string, parent *ProxySetProvider, hc *HealthCheck, filterReg *regexp.Regexp) (*FilterableProvider, error) {
+	if hc.auto() {
+		go hc.process()
+	}
+
+	pd := &filterableProvider{
+		name:        name,
+		parent:      parent,
+		healthCheck: hc,
+		filterReg:   filterReg,
+	}
+
+	_ = pd.Update()
+
+	wrapper := &FilterableProvider{pd}
+	runtime.SetFinalizer(wrapper, stopFilterableProvider)
 	return wrapper, nil
 }

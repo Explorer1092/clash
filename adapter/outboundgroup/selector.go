@@ -98,7 +98,10 @@ func (s *Selector) selectedProxy(touch bool) C.Proxy {
 }
 
 func NewSelector(option *GroupCommonOption, providers []provider.ProxyProvider) *Selector {
-	selected := providers[0].Proxies()[0].Name()
+	selected := ""
+	if len(providers[0].Proxies()) != 0 { // allow empty filterable proxy provider
+		selected = providers[0].Proxies()[0].Name()
+	}
 	return &Selector{
 		Base: outbound.NewBase(outbound.BaseOption{
 			Name:        option.Name,

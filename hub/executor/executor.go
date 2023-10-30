@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/phuslu/log"
+	"github.com/samber/lo"
 
 	"github.com/Dreamacro/clash/adapter"
 	"github.com/Dreamacro/clash/adapter/outboundgroup"
@@ -71,12 +72,6 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	mux.Lock()
 	defer mux.Unlock()
 
-	if cfg.General.LogLevel == L.DEBUG {
-		L.SetLevel(L.DEBUG)
-	} else {
-		L.SetLevel(L.INFO)
-	}
-
 	updateUsers(cfg.Users)
 	updateProxies(cfg.Proxies, cfg.Providers)
 	updateRules(cfg.Rules)
@@ -84,8 +79,9 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateHosts(cfg.Hosts)
 	updateMitm(cfg.Mitm)
 	updateProfile(cfg)
-	updateDNS(cfg.DNS, &cfg.General.Tun, force)
+	updateDNS(cfg.DNS, &cfg.General.Tun)
 	updateGeneral(cfg.General, force)
+	updateInbounds(cfg.Inbounds, force)
 	updateExperimental(cfg)
 	updateTunnels(cfg.Tunnels)
 
@@ -94,28 +90,34 @@ func ApplyConfig(cfg *config.Config, force bool) {
 
 func GetGeneral() *config.General {
 	ports := listener.GetPorts()
-	authenticator := []string{}
+	auths := make([]string, 0)
 	if authM := authStore.Authenticator(); authM != nil {
-		authenticator = authM.Users()
+		auths = lo.Map(authM.Users(), func(s string, _ int) string {
+			l := len(s)
+			if l == 0 {
+				return ""
+			}
+			return fmt.Sprintf("%s****%s", s[0:1], s[l-1:l])
+		})
 	}
 
 	general := &config.General{
-		Inbound: config.Inbound{
-			Port:           ports.Port,
-			SocksPort:      ports.SocksPort,
-			RedirPort:      ports.RedirPort,
-			TProxyPort:     ports.TProxyPort,
-			MixedPort:      ports.MixedPort,
-			MitmPort:       ports.MitmPort,
-			Authentication: authenticator,
-			AllowLan:       listener.AllowLan(),
-			BindAddress:    listener.BindAddress(),
+		LegacyInbound: config.LegacyInbound{
+			Port:        ports.Port,
+			SocksPort:   ports.SocksPort,
+			RedirPort:   ports.RedirPort,
+			TProxyPort:  ports.TProxyPort,
+			MixedPort:   ports.MixedPort,
+			MitmPort:    ports.MitmPort,
+			AllowLan:    listener.AllowLan(),
+			BindAddress: listener.BindAddress(),
 		},
-		Mode:     tunnel.Mode(),
-		LogLevel: L.Level(),
-		IPv6:     !resolver.DisableIPv6,
-		Sniffing: tunnel.Sniffing(),
-		Tun:      listener.GetTunConf(),
+		Authentication: auths,
+		Mode:           tunnel.Mode(),
+		LogLevel:       L.Level(),
+		IPv6:           !resolver.DisableIPv6,
+		Sniffing:       tunnel.Sniffing(),
+		Tun:            C.GetTunConf(),
 	}
 
 	return general
@@ -131,7 +133,7 @@ func updateExperimental(c *config.Config) {
 	tunnel.UDPFallbackPolicy.Store(udpPolicy)
 }
 
-func updateDNS(c *config.DNS, t *config.Tun, force bool) {
+func updateDNS(c *config.DNS, t *C.Tun) {
 	cfg := dns.Config{
 		Main:         c.NameServer,
 		Fallback:     c.Fallback,
@@ -146,13 +148,14 @@ func updateDNS(c *config.DNS, t *config.Tun, force bool) {
 			Domain:    c.FallbackFilter.Domain,
 			GeoSite:   c.FallbackFilter.GeoSite,
 		},
-		Default:     c.DefaultNameserver,
-		Policy:      c.NameServerPolicy,
-		ProxyServer: c.ProxyServerNameserver,
+		Default:       c.DefaultNameserver,
+		Policy:        c.NameServerPolicy,
+		ProxyServer:   c.ProxyServerNameserver,
+		Remote:        c.RemoteNameserver,
+		SearchDomains: c.SearchDomains,
 	}
 
 	r := dns.NewResolver(cfg)
-	pr := dns.NewProxyServerHostResolver(r)
 	m := dns.NewEnhancer(cfg)
 
 	// reuse cache of old host mapper
@@ -162,19 +165,9 @@ func updateDNS(c *config.DNS, t *config.Tun, force bool) {
 
 	resolver.DefaultResolver = r
 	resolver.DefaultHostMapper = m
-
-	if pr.HasProxyServer() {
-		resolver.ProxyServerHostResolver = pr
-	}
+	resolver.DefaultLocalServer = dns.NewLocalServer(r, m)
 
 	resolver.RemoteDnsResolve = c.RemoteDnsResolve
-	if resolver.RemoteResolver == nil || force {
-		resolver.RemoteResolver = dns.NewRemoteResolver(cfg.IPv6)
-	}
-
-	if t.Enable {
-		resolver.DefaultLocalServer = dns.NewLocalServer(r, m)
-	}
 
 	if c.Enable {
 		dns.ReCreateServer(c.Listen, r, m)
@@ -183,7 +176,6 @@ func updateDNS(c *config.DNS, t *config.Tun, force bool) {
 			resolver.DefaultResolver = nil
 			resolver.DefaultHostMapper = nil
 			resolver.DefaultLocalServer = nil
-			resolver.ProxyServerHostResolver = nil
 		}
 		dns.ReCreateServer("", nil, nil)
 	}
@@ -217,13 +209,26 @@ func updateTunnels(tunnels []config.Tunnel) {
 	listener.PatchTunnel(tunnels, tunnel.TCPIn(), tunnel.UDPIn())
 }
 
+func updateInbounds(inbounds []C.Inbound, force bool) {
+	if !force {
+		return
+	}
+	tcpIn := tunnel.TCPIn()
+	udpIn := tunnel.UDPIn()
+
+	listener.ReCreateListeners(inbounds, tcpIn, udpIn)
+}
+
 func updateGeneral(general *config.General, force bool) {
 	tunnel.SetMode(general.Mode)
-	resolver.DisableIPv6 = !general.IPv6
+	resolver.SetDisableIPv6(!general.IPv6)
 
-	dialer.DefaultInterface.Store(general.Interface)
-	if dialer.DefaultInterface.Load() != "" {
-		log.Info().Str("name", general.Interface).Msg("[Config] interface")
+	defaultInterface := general.Interface
+	if defaultInterface != "" || (defaultInterface == "" && !general.Tun.Enable) {
+		dialer.DefaultInterface.Store(defaultInterface)
+		if defaultInterface != "" {
+			log.Info().Str("name", defaultInterface).Msg("[Config] default interface")
+		}
 	}
 
 	if general.RoutingMark > 0 || (general.RoutingMark == 0 && general.TProxyPort == 0) {
@@ -250,16 +255,21 @@ func updateGeneral(general *config.General, force bool) {
 
 	log.Info().Bool("sniffing", sniffing).Msg("[Config] tls")
 
+	general.Tun.StopRouteListener = true
+
 	tcpIn := tunnel.TCPIn()
 	udpIn := tunnel.UDPIn()
+	ports := listener.Ports{
+		Port:       general.Port,
+		SocksPort:  general.SocksPort,
+		RedirPort:  general.RedirPort,
+		TProxyPort: general.TProxyPort,
+		MixedPort:  general.MixedPort,
+		MitmPort:   general.MitmPort,
+	}
 
-	listener.ReCreateHTTP(general.Port, tcpIn)
-	listener.ReCreateSocks(general.SocksPort, tcpIn, udpIn)
-	listener.ReCreateRedir(general.RedirPort, tcpIn, udpIn)
-	listener.ReCreateAutoRedir(general.EBpf.AutoRedir, general.Interface, tcpIn, udpIn)
-	listener.ReCreateTProxy(general.TProxyPort, tcpIn, udpIn)
-	listener.ReCreateMixed(general.MixedPort, tcpIn, udpIn)
-	listener.ReCreateMitm(general.MitmPort, tcpIn)
+	listener.ReCreatePortsListeners(ports, tcpIn, udpIn)
+	listener.ReCreateAutoRedir(general.EBpf.AutoRedir, defaultInterface, tcpIn, udpIn)
 	listener.ReCreateTun(&general.Tun, tcpIn, udpIn)
 	listener.ReCreateRedirToTun(general.EBpf.RedirectToTun)
 }
@@ -313,5 +323,6 @@ func Shutdown() {
 	listener.Cleanup()
 	resolver.StoreFakePoolState()
 
-	log.Warn().Msg("Clash shutting down")
+	L.SetLevel(L.INFO)
+	log.Info().Msg("[Main] Clash shutting down")
 }

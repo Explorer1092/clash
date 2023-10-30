@@ -4,6 +4,7 @@ import (
 	"os"
 	P "path"
 	"path/filepath"
+	"strings"
 )
 
 const Name = "clash"
@@ -16,6 +17,12 @@ var Path = func() *path {
 	}
 
 	homeDir = P.Join(homeDir, ".config", Name)
+	if _, err = os.Stat(homeDir); err != nil {
+		if home, ok := os.LookupEnv("XDG_CONFIG_HOME"); ok {
+			homeDir = P.Join(home, Name)
+		}
+	}
+
 	return &path{homeDir: homeDir, configFile: "config.yaml"}
 }()
 
@@ -42,13 +49,20 @@ func (p *path) Config() string {
 	return p.configFile
 }
 
-// Resolve return a absolute path or a relative path with homedir
+// Resolve return an absolute path or a relative path with homedir
 func (p *path) Resolve(path string) string {
 	if !filepath.IsAbs(path) {
 		return filepath.Join(p.HomeDir(), path)
 	}
 
 	return path
+}
+
+func (p *path) IsSubHomeDir(path string) bool {
+	if rel, err := filepath.Rel(p.HomeDir(), p.Resolve(path)); err != nil || strings.Contains(rel, "..") {
+		return false
+	}
+	return true
 }
 
 func (p *path) MMDB() string {

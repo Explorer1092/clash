@@ -4,12 +4,14 @@ import (
 	"net"
 
 	"github.com/Dreamacro/clash/common/cache"
+	"github.com/Dreamacro/clash/component/auth"
 	C "github.com/Dreamacro/clash/constant"
 )
 
 type Listener struct {
 	listener net.Listener
 	addr     string
+	auth     auth.Authenticator
 	closed   bool
 }
 
@@ -29,11 +31,16 @@ func (l *Listener) Close() error {
 	return l.listener.Close()
 }
 
-func New(addr string, in chan<- C.ConnContext) (*Listener, error) {
+// SetAuthenticator implements C.AuthenticatorListener
+func (l *Listener) SetAuthenticator(users []auth.AuthUser) {
+	l.auth = auth.NewAuthenticator(users)
+}
+
+func New(addr string, in chan<- C.ConnContext) (C.Listener, error) {
 	return NewWithAuthenticate(addr, in, true)
 }
 
-func NewWithAuthenticate(addr string, in chan<- C.ConnContext, authenticate bool) (*Listener, error) {
+func NewWithAuthenticate(addr string, in chan<- C.ConnContext, authenticate bool) (C.Listener, error) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -57,7 +64,7 @@ func NewWithAuthenticate(addr string, in chan<- C.ConnContext, authenticate bool
 				}
 				continue
 			}
-			go HandleConn(conn, in, c)
+			go HandleConn(conn, in, c, hl.auth)
 		}
 	}()
 

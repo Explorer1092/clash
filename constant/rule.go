@@ -1,6 +1,10 @@
 package constant
 
-import "github.com/Dreamacro/clash/component/geodata/router"
+import (
+	"fmt"
+
+	"github.com/Dreamacro/clash/component/geodata/router"
+)
 
 // Rule Type
 const (
@@ -13,11 +17,14 @@ const (
 	SrcIPCIDR
 	SrcPort
 	DstPort
+	InboundPort
 	Process
 	ProcessPath
 	Script
 	UserAgent
+	IPSet
 	MATCH
+	Group
 )
 
 type RuleType int
@@ -42,6 +49,8 @@ func (rt RuleType) String() string {
 		return "SrcPort"
 	case DstPort:
 		return "DstPort"
+	case InboundPort:
+		return "InboundPort"
 	case Process:
 		return "Process"
 	case ProcessPath:
@@ -50,10 +59,28 @@ func (rt RuleType) String() string {
 		return "Script"
 	case UserAgent:
 		return "UserAgent"
+	case IPSet:
+		return "IPSet"
 	case MATCH:
 		return "Match"
+	case Group:
+		return "Group"
 	default:
 		return "Unknown"
+	}
+}
+
+type RuleGroup []string
+
+func (rg RuleGroup) String() string {
+	l := len(rg)
+	switch l {
+	case 0:
+		return ""
+	case 1:
+		return rg[0]
+	default:
+		return fmt.Sprintf("%s[%s]", rg[l-1], rg[0])
 	}
 }
 
@@ -66,6 +93,9 @@ type Rule interface {
 	RuleExtra() *RuleExtra
 	SetRuleExtra(re *RuleExtra)
 	ShouldFindProcess() bool
+	SubRules() []Rule
+	RuleGroups() RuleGroup
+	AppendGroup(group string)
 }
 
 type RuleGeoSite interface {

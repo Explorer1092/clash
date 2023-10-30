@@ -13,6 +13,8 @@ import (
 	"github.com/Dreamacro/clash/transport/snell"
 )
 
+var _ C.ProxyAdapter = (*Snell)(nil)
+
 type Snell struct {
 	*Base
 	psk        []byte
@@ -23,14 +25,15 @@ type Snell struct {
 
 type SnellOption struct {
 	BasicOption
-	Name       string         `proxy:"name"`
-	Server     string         `proxy:"server"`
-	Port       int            `proxy:"port"`
-	Psk        string         `proxy:"psk"`
-	UDP        bool           `proxy:"udp,omitempty"`
-	Version    int            `proxy:"version,omitempty"`
-	ObfsOpts   map[string]any `proxy:"obfs-opts,omitempty"`
-	RandomHost bool           `proxy:"rand-host,omitempty"`
+	Name             string         `proxy:"name"`
+	Server           string         `proxy:"server"`
+	Port             int            `proxy:"port"`
+	Psk              string         `proxy:"psk"`
+	UDP              bool           `proxy:"udp,omitempty"`
+	Version          int            `proxy:"version,omitempty"`
+	ObfsOpts         map[string]any `proxy:"obfs-opts,omitempty"`
+	RandomHost       bool           `proxy:"rand-host,omitempty"`
+	RemoteDnsResolve bool           `proxy:"remote-dns-resolve,omitempty"`
 }
 
 type streamOption struct {
@@ -54,8 +57,7 @@ func streamConn(c net.Conn, option streamOption) *snell.Snell {
 // StreamConn implements C.ProxyAdapter
 func (s *Snell) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	c = streamConn(c, streamOption{s.psk, s.version, s.addr, s.obfsOption})
-	port, _ := strconv.ParseUint(metadata.DstPort, 10, 16)
-	err := snell.WriteHeader(c, metadata.String(), uint(port), s.version)
+	err := snell.WriteHeader(c, metadata.String(), uint(metadata.DstPort), s.version)
 	return c, err
 }
 
@@ -79,8 +81,7 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata, opts ...d
 			return nil, err
 		}
 
-		port, _ := strconv.ParseUint(metadata.DstPort, 10, 16)
-		if err = snell.WriteHeader(c, metadata.String(), uint(port), s.version); err != nil {
+		if err = snell.WriteHeader(c, metadata.String(), uint(metadata.DstPort), s.version); err != nil {
 			_ = c.Close()
 			return nil, err
 		}
@@ -157,6 +158,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 			udp:   option.UDP,
 			iface: option.Interface,
 			rmark: option.RoutingMark,
+			dns:   option.RemoteDnsResolve,
 		},
 		psk:        psk,
 		obfsOption: obfsOption,

@@ -8,9 +8,12 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Dreamacro/clash/common/errors2"
 )
+
+var durationType = reflect.TypeOf(time.Duration(0))
 
 // Option is the configuration that is used to create a new decoder
 type Option struct {
@@ -92,22 +95,47 @@ func (d *Decoder) decode(name string, data any, val reflect.Value) error {
 
 func (d *Decoder) decodeInt(name string, data any, val reflect.Value) (err error) {
 	dataVal := reflect.ValueOf(data)
-	kind := dataVal.Kind()
 	switch {
-	case kind == reflect.Int, kind == reflect.Int8, kind == reflect.Int16,
-		kind == reflect.Int32, kind == reflect.Int64:
-		val.SetInt(dataVal.Int())
-	case kind == reflect.Uint, kind == reflect.Uint8, kind == reflect.Uint16,
-		kind == reflect.Uint32, kind == reflect.Uint64:
-		val.SetInt(int64(dataVal.Uint()))
-	case kind == reflect.Float64 && d.option.WeaklyTypedInput:
-		val.SetInt(int64(dataVal.Float()))
-	case kind == reflect.String && d.option.WeaklyTypedInput:
-		var i int64
-		i, err = strconv.ParseInt(dataVal.String(), 0, val.Type().Bits())
+	case dataVal.CanInt():
+		resolved := dataVal.Int()
+		if val.Type() == durationType {
+			resolved *= 1e9
+		}
+		val.SetInt(resolved)
+	case dataVal.CanUint():
+		resolved := dataVal.Uint()
+		if val.Type() == durationType {
+			resolved *= 1e9
+		}
+		val.SetInt(int64(resolved))
+	case dataVal.CanFloat() && d.option.WeaklyTypedInput:
+		resolved := dataVal.Float()
+		if val.Type() == durationType {
+			resolved *= 1e9
+		}
+		val.SetInt(int64(resolved))
+	case dataVal.Kind() == reflect.String && d.option.WeaklyTypedInput:
+		var (
+			rs       int64
+			valType  = val.Type()
+			resolved = dataVal.String()
+		)
+
+		rs, err = strconv.ParseInt(resolved, 0, valType.Bits())
 		if err == nil {
-			val.SetInt(i)
-		} else {
+			if valType == durationType {
+				rs *= 1e9
+			}
+			val.SetInt(rs)
+		} else if valType == durationType {
+			dur, err1 := time.ParseDuration(resolved)
+			if err1 == nil {
+				val.SetInt(int64(dur))
+			}
+			err = err1
+		}
+
+		if err != nil {
 			err = fmt.Errorf("cannot parse '%s' as int: %w", name, err)
 		}
 	default:
@@ -121,23 +149,20 @@ func (d *Decoder) decodeInt(name string, data any, val reflect.Value) (err error
 
 func (d *Decoder) decodeUint(name string, data any, val reflect.Value) (err error) {
 	dataVal := reflect.ValueOf(data)
-	kind := dataVal.Kind()
 	switch {
-	case kind == reflect.Int, kind == reflect.Int8, kind == reflect.Int16, kind == reflect.Int32,
-		kind == reflect.Int64:
+	case dataVal.CanInt():
 		val.SetUint(uint64(dataVal.Int()))
-	case kind == reflect.Uint, kind == reflect.Uint8, kind == reflect.Uint16,
-		kind == reflect.Uint32, kind == reflect.Uint64:
+	case dataVal.CanUint():
 		val.SetUint(dataVal.Uint())
-	case kind == reflect.Float64 && d.option.WeaklyTypedInput:
+	case dataVal.CanFloat() && d.option.WeaklyTypedInput:
 		val.SetUint(uint64(dataVal.Float()))
-	case kind == reflect.String && d.option.WeaklyTypedInput:
+	case dataVal.Kind() == reflect.String && d.option.WeaklyTypedInput:
 		var i uint64
 		i, err = strconv.ParseUint(dataVal.String(), 0, val.Type().Bits())
 		if err == nil {
 			val.SetUint(i)
 		} else {
-			err = fmt.Errorf("cannot parse '%s' as int: %w", name, err)
+			err = fmt.Errorf("cannot parse '%s' as uint: %w", name, err)
 		}
 	default:
 		err = fmt.Errorf(
@@ -154,7 +179,9 @@ func (d *Decoder) decodeString(name string, data any, val reflect.Value) (err er
 	switch {
 	case kind == reflect.String:
 		val.SetString(dataVal.String())
-	case kind == reflect.Int && d.option.WeaklyTypedInput:
+	case kind == reflect.Bool && d.option.WeaklyTypedInput:
+		val.SetString(strconv.FormatBool(dataVal.Bool()))
+	case dataVal.CanInt() && d.option.WeaklyTypedInput:
 		val.SetString(strconv.FormatInt(dataVal.Int(), 10))
 	default:
 		err = fmt.Errorf(
@@ -171,8 +198,11 @@ func (d *Decoder) decodeBool(name string, data any, val reflect.Value) (err erro
 	switch {
 	case kind == reflect.Bool:
 		val.SetBool(dataVal.Bool())
-	case kind == reflect.Int && d.option.WeaklyTypedInput:
+	case dataVal.CanInt() && d.option.WeaklyTypedInput:
 		val.SetBool(dataVal.Int() != 0)
+	case kind == reflect.String && d.option.WeaklyTypedInput:
+		v, _ := strconv.ParseBool(dataVal.String())
+		val.SetBool(v)
 	default:
 		err = fmt.Errorf(
 			"'%s' expected type '%s', got unconvertible type '%s'",

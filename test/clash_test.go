@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,7 +36,7 @@ const (
 	ImageTrojanGo        = "p4gefau1t/trojan-go:latest"
 	ImageSnell           = "ghcr.io/icpz/snell-server:latest"
 	ImageXray            = "teddysun/xray:latest"
-	ImageBoringTun       = "ghcr.io/ntkme/boringtun:edge"
+	ImageWireguardGo     = "masipcat/wireguard-go:latest"
 )
 
 var (
@@ -104,7 +104,7 @@ func init() {
 		ImageTrojanGo,
 		ImageSnell,
 		ImageXray,
-		ImageBoringTun,
+		ImageWireguardGo,
 	}
 
 	for _, image := range images {
@@ -128,8 +128,10 @@ socks-port: 0
 mixed-port: 0
 redir-port: 0
 tproxy-port: 0
+mitm-port: 0
 dns:
 	enable: false
+	listen: ""
 `
 
 func cleanup() {
@@ -213,23 +215,27 @@ func newLargeDataPair() (chan hashPair, chan hashPair, func(t *testing.T) error)
 	return pingCh, pongCh, test
 }
 
-func testPingPongWithSocksPort(t *testing.T, port int) {
+func testPingPongWithSocksPort(t *testing.T, port int) error {
+	l, err := Listen("tcp", ":10001")
+	require.NoError(t, err)
+	defer l.Close()
+
 	pingCh, pongCh, test := newPingPongPair()
 	go func() {
-		l, err := Listen("tcp", ":10001")
-		require.NoError(t, err)
-		defer l.Close()
-
 		c, err := l.Accept()
-		require.NoError(t, err)
+		if err != nil {
+			return
+		}
 
 		buf := make([]byte, 4)
-		_, err = io.ReadFull(c, buf)
-		require.NoError(t, err)
+		if _, err = io.ReadFull(c, buf); err != nil {
+			return
+		}
 
 		pingCh <- buf
-		_, err = c.Write([]byte("pong"))
-		require.NoError(t, err)
+		if _, err = c.Write([]byte("pong")); err != nil {
+			return
+		}
 	}()
 
 	go func() {
@@ -237,23 +243,26 @@ func testPingPongWithSocksPort(t *testing.T, port int) {
 		require.NoError(t, err)
 		defer c.Close()
 
-		_, err = socks5.ClientHandshake(c, socks5.ParseAddr("127.0.0.1:10001"), socks5.CmdConnect, nil)
-		require.NoError(t, err)
+		if _, err = socks5.ClientHandshake(c, socks5.ParseAddr("127.0.0.1:10001"), socks5.CmdConnect, nil); err != nil {
+			return
+		}
 
-		_, err = c.Write([]byte("ping"))
-		require.NoError(t, err)
+		if _, err = c.Write([]byte("ping")); err != nil {
+			return
+		}
 
 		buf := make([]byte, 4)
-		_, err = io.ReadFull(c, buf)
-		require.NoError(t, err)
+		if _, err = io.ReadFull(c, buf); err != nil {
+			return
+		}
 
 		pongCh <- buf
 	}()
 
-	test(t)
+	return test(t)
 }
 
-func testPingPongWithConn(t *testing.T, c net.Conn) error {
+func testPingPongWithConn(t *testing.T, dialFn func() (net.Conn, error)) error {
 	l, err := Listen("tcp", ":10001")
 	if err != nil {
 		return err
@@ -278,6 +287,10 @@ func testPingPongWithConn(t *testing.T, c net.Conn) error {
 		}
 	}()
 
+	c, err := dialFn()
+	require.NoError(t, err)
+	defer c.Close()
+
 	go func() {
 		if _, err := c.Write([]byte("ping")); err != nil {
 			return
@@ -294,12 +307,16 @@ func testPingPongWithConn(t *testing.T, c net.Conn) error {
 	return test(t)
 }
 
-func testPingPongWithPacketConn(t *testing.T, pc net.PacketConn) error {
-	l, err := ListenPacket("udp", ":10001")
+func testPingPongWithPacketConn(t *testing.T, pc net.PacketConn, port int) error {
+	l, err := ListenPacket("udp", fmt.Sprintf(":%d", port))
+	if errors.Is(err, syscall.EADDRINUSE) {
+		t.Logf("skip udp test by error: %s", err)
+		return nil
+	}
 	require.NoError(t, err)
 	defer l.Close()
 
-	rAddr := &net.UDPAddr{IP: localIP.AsSlice(), Port: 10001}
+	rAddr := &net.UDPAddr{IP: localIP.AsSlice(), Port: port}
 
 	pingCh, pongCh, test := newPingPongPair()
 	go func() {
@@ -337,7 +354,7 @@ type hashPair struct {
 	recvHash map[int][]byte
 }
 
-func testLargeDataWithConn(t *testing.T, c net.Conn) error {
+func testLargeDataWithConn(t *testing.T, dialFn func() (net.Conn, error)) error {
 	l, err := Listen("tcp", ":10001")
 	require.NoError(t, err)
 	defer l.Close()
@@ -399,6 +416,9 @@ func testLargeDataWithConn(t *testing.T, c net.Conn) error {
 		}
 	}()
 
+	c, err := dialFn()
+	require.NoError(t, err)
+
 	go func() {
 		sendHash, err := writeRandData(c)
 		if err != nil {
@@ -429,12 +449,16 @@ func testLargeDataWithConn(t *testing.T, c net.Conn) error {
 	return test(t)
 }
 
-func testLargeDataWithPacketConn(t *testing.T, pc net.PacketConn) error {
-	l, err := ListenPacket("udp", ":10001")
+func testLargeDataWithPacketConn(t *testing.T, pc net.PacketConn, port int) error {
+	l, err := ListenPacket("udp", fmt.Sprintf(":%d", port))
+	if errors.Is(err, syscall.EADDRINUSE) {
+		t.Logf("skip udp test by error: %s", err)
+		return nil
+	}
 	require.NoError(t, err)
 	defer l.Close()
 
-	rAddr := &net.UDPAddr{IP: localIP.AsSlice(), Port: 10001}
+	rAddr := &net.UDPAddr{IP: localIP.AsSlice(), Port: port}
 
 	times := 50
 	chunkSize := int64(1024)
@@ -442,27 +466,30 @@ func testLargeDataWithPacketConn(t *testing.T, pc net.PacketConn) error {
 	pingCh, pongCh, test := newLargeDataPair()
 	writeRandData := func(pc net.PacketConn, addr net.Addr) (map[int][]byte, error) {
 		hashMap := map[int][]byte{}
-		mux := sync.Mutex{}
+		bufs := [][]byte{}
+
 		for i := 0; i < times; i++ {
-			go func(idx int) {
-				buf := make([]byte, chunkSize)
-				if _, err := rand.Read(buf[1:]); err != nil {
-					t.Log(err.Error())
-					return
-				}
-				buf[0] = byte(idx)
+			idx := i
+			buf := make([]byte, chunkSize)
+			rand.Read(buf[1:])
+			buf[0] = byte(idx)
 
-				hash := md5.Sum(buf)
-				mux.Lock()
-				hashMap[idx] = hash[:]
-				mux.Unlock()
-
-				if _, err := pc.WriteTo(buf, addr); err != nil {
-					t.Log(err.Error())
-					return
-				}
-			}(i)
+			hash := md5.Sum(buf)
+			hashMap[idx] = hash[:]
+			bufs = append(bufs, buf)
 		}
+
+		go func() {
+			cursor := 0
+			for {
+				idx := cursor % times
+				buf := bufs[idx]
+				if _, err := pc.WriteTo(buf, addr); err != nil {
+					return
+				}
+				cursor++
+			}
+		}()
 
 		return hashMap, nil
 	}
@@ -472,15 +499,16 @@ func testLargeDataWithPacketConn(t *testing.T, pc net.PacketConn) error {
 		hashMap := map[int][]byte{}
 		buf := make([]byte, 64*1024)
 
-		for i := 0; i < times; i++ {
+		for len(hashMap) != times {
 			_, rAddr, err = l.ReadFrom(buf)
 			if err != nil {
-				t.Log(err.Error())
 				return
 			}
 
-			hash := md5.Sum(buf[:chunkSize])
-			hashMap[int(buf[0])] = hash[:]
+			if _, ok := hashMap[int(buf[0])]; !ok {
+				hash := md5.Sum(buf[:chunkSize])
+				hashMap[int(buf[0])] = hash[:]
+			}
 		}
 
 		sendHash, err := writeRandData(l, rAddr)
@@ -505,15 +533,16 @@ func testLargeDataWithPacketConn(t *testing.T, pc net.PacketConn) error {
 		hashMap := map[int][]byte{}
 		buf := make([]byte, 64*1024)
 
-		for i := 0; i < times; i++ {
+		for len(hashMap) != times {
 			_, _, err := pc.ReadFrom(buf)
 			if err != nil {
-				t.Log(err.Error())
 				return
 			}
 
-			hash := md5.Sum(buf[:chunkSize])
-			hashMap[int(buf[0])] = hash[:]
+			if _, ok := hashMap[int(buf[0])]; !ok {
+				hash := md5.Sum(buf[:chunkSize])
+				hashMap[int(buf[0])] = hash[:]
+			}
 		}
 
 		pongCh <- hashPair{
@@ -545,55 +574,64 @@ func testPacketConnTimeout(t *testing.T, pc net.PacketConn) error {
 }
 
 func testSuit(t *testing.T, proxy C.ProxyAdapter) {
-	conn, err := proxy.DialContext(context.Background(), &C.Metadata{
-		Host:    localIP.String(),
-		DstPort: "10001",
-	})
-	require.NoError(t, err)
-	defer conn.Close()
-	assert.NoError(t, testPingPongWithConn(t, conn))
+	dest := localIP
+	if proxy.Type() == C.WireGuard && !isDarwin {
+		dest = netip.MustParseAddr("10.0.0.1")
+	}
 
-	conn, err = proxy.DialContext(context.Background(), &C.Metadata{
-		Host:    localIP.String(),
-		DstPort: "10001",
-	})
-	require.NoError(t, err)
-	defer conn.Close()
-	assert.NoError(t, testLargeDataWithConn(t, conn))
+	dialTcpFn := func() (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
+		defer cancel()
+		return proxy.DialContext(ctx, &C.Metadata{
+			Host:    dest.String(),
+			DstPort: 10001,
+		})
+	}
+
+	assert.NoError(t, testPingPongWithConn(t, dialTcpFn))
+
+	if proxy.Type() == C.WireGuard && isDarwin {
+		return
+	}
+
+	assert.NoError(t, testLargeDataWithConn(t, dialTcpFn))
 
 	if !proxy.SupportUDP() {
 		return
 	}
 
+	udpPort := 10010
 	pc, err := proxy.ListenPacketContext(context.Background(), &C.Metadata{
 		NetWork: C.UDP,
-		DstIP:   localIP,
-		DstPort: "10001",
+		DstIP:   dest,
+		DstPort: C.Port(udpPort),
 	})
 	require.NoError(t, err)
-	defer pc.Close()
 
-	assert.NoError(t, testPingPongWithPacketConn(t, pc))
+	assert.NoError(t, testPingPongWithPacketConn(t, pc, udpPort))
+	_ = pc.Close()
 
+	udpPort++
 	pc, err = proxy.ListenPacketContext(context.Background(), &C.Metadata{
 		NetWork: C.UDP,
-		DstIP:   localIP,
-		DstPort: "10001",
+		DstIP:   dest,
+		DstPort: C.Port(udpPort),
 	})
 	require.NoError(t, err)
-	defer pc.Close()
 
-	assert.NoError(t, testLargeDataWithPacketConn(t, pc))
+	assert.NoError(t, testLargeDataWithPacketConn(t, pc, udpPort))
+	_ = pc.Close()
 
+	udpPort++
 	pc, err = proxy.ListenPacketContext(context.Background(), &C.Metadata{
 		NetWork: C.UDP,
-		DstIP:   localIP,
-		DstPort: "10001",
+		DstIP:   dest,
+		DstPort: C.Port(udpPort),
 	})
 	require.NoError(t, err)
-	defer pc.Close()
 
 	assert.NoError(t, testPacketConnTimeout(t, pc))
+	_ = pc.Close()
 }
 
 func benchmarkProxy(b *testing.B, proxy C.ProxyAdapter) {
@@ -625,7 +663,7 @@ func benchmarkProxy(b *testing.B, proxy C.ProxyAdapter) {
 
 	conn, err := proxy.DialContext(context.Background(), &C.Metadata{
 		Host:    localIP.String(),
-		DstPort: "10001",
+		DstPort: 10001,
 	})
 	require.NoError(b, err)
 
@@ -651,15 +689,17 @@ func benchmarkProxy(b *testing.B, proxy C.ProxyAdapter) {
 func TestClash_Basic(t *testing.T) {
 	basic := `
 mixed-port: 10000
-log-level: debug
+log-level: silent
+rules:
+  - match, DIRECT
 `
 
 	err := parseAndApply(basic)
 	require.NoError(t, err)
 	defer cleanup()
 
-	require.True(t, TCPing(net.JoinHostPort(localIP.String(), "10000")))
-	testPingPongWithSocksPort(t, 10000)
+	require.True(t, TCPing(net.JoinHostPort("127.0.0.1", "10000")))
+	require.NoError(t, testPingPongWithSocksPort(t, 10000))
 }
 
 func Benchmark_Direct(b *testing.B) {

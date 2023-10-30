@@ -14,8 +14,9 @@ import (
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/transport/gun"
 	"github.com/Dreamacro/clash/transport/trojan"
-	"github.com/Dreamacro/clash/transport/vless"
 )
+
+var _ C.ProxyAdapter = (*Trojan)(nil)
 
 type Trojan struct {
 	*Base
@@ -30,19 +31,18 @@ type Trojan struct {
 
 type TrojanOption struct {
 	BasicOption
-	Name           string      `proxy:"name"`
-	Server         string      `proxy:"server"`
-	Port           int         `proxy:"port"`
-	Password       string      `proxy:"password"`
-	ALPN           []string    `proxy:"alpn,omitempty"`
-	SNI            string      `proxy:"sni,omitempty"`
-	SkipCertVerify bool        `proxy:"skip-cert-verify,omitempty"`
-	UDP            bool        `proxy:"udp,omitempty"`
-	Network        string      `proxy:"network,omitempty"`
-	GrpcOpts       GrpcOptions `proxy:"grpc-opts,omitempty"`
-	WSOpts         WSOptions   `proxy:"ws-opts,omitempty"`
-	Flow           string      `proxy:"flow,omitempty"`
-	FlowShow       bool        `proxy:"flow-show,omitempty"`
+	Name             string      `proxy:"name"`
+	Server           string      `proxy:"server"`
+	Port             int         `proxy:"port"`
+	Password         string      `proxy:"password"`
+	ALPN             []string    `proxy:"alpn,omitempty"`
+	SNI              string      `proxy:"sni,omitempty"`
+	SkipCertVerify   bool        `proxy:"skip-cert-verify,omitempty"`
+	UDP              bool        `proxy:"udp,omitempty"`
+	Network          string      `proxy:"network,omitempty"`
+	GrpcOpts         GrpcOptions `proxy:"grpc-opts,omitempty"`
+	WSOpts           WSOptions   `proxy:"ws-opts,omitempty"`
+	RemoteDnsResolve bool        `proxy:"remote-dns-resolve,omitempty"`
 }
 
 func (t *Trojan) plainStream(c net.Conn) (net.Conn, error) {
@@ -82,11 +82,6 @@ func (t *Trojan) trojanStream(c net.Conn, metadata *C.Metadata) (net.Conn, error
 
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
-	}
-
-	c, err = t.instance.PrepareXTLSConn(c)
-	if err != nil {
-		return c, err
 	}
 
 	if metadata.NetWork == C.UDP {
@@ -130,11 +125,6 @@ func (t *Trojan) DialContext(ctx context.Context, metadata *C.Metadata, opts ...
 			safeConnClose(cc, e)
 		}(c, err)
 
-		c, err = t.instance.PrepareXTLSConn(c)
-		if err != nil {
-			return nil, err
-		}
-
 		if err = t.instance.WriteHeader(c, trojan.CommandTCP, serializesSocksAddr(metadata)); err != nil {
 			return nil, err
 		}
@@ -175,11 +165,6 @@ func (t *Trojan) ListenPacketContext(ctx context.Context, metadata *C.Metadata, 
 			safeConnClose(cc, e)
 		}(c, err)
 
-		c, err = t.instance.PrepareXTLSConn(c)
-		if err != nil {
-			return nil, err
-		}
-
 		if err = t.instance.WriteHeader(c, trojan.CommandUDP, serializesSocksAddr(metadata)); err != nil {
 			return nil, err
 		}
@@ -216,17 +201,6 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 		ALPN:           option.ALPN,
 		ServerName:     option.Server,
 		SkipCertVerify: option.SkipCertVerify,
-		FlowShow:       option.FlowShow,
-	}
-
-	if option.Network != "ws" && len(option.Flow) >= 16 {
-		option.Flow = option.Flow[:16]
-		switch option.Flow {
-		case vless.XRO, vless.XRD, vless.XRS:
-			tOption.Flow = option.Flow
-		default:
-			return nil, fmt.Errorf("unsupported xtls flow type: %s", option.Flow)
-		}
 	}
 
 	if option.SNI != "" {
@@ -241,6 +215,7 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			udp:   option.UDP,
 			iface: option.Interface,
 			rmark: option.RoutingMark,
+			dns:   option.RemoteDnsResolve,
 		},
 		instance: trojan.New(tOption),
 		option:   &option,
@@ -263,11 +238,7 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			ServerName:         tOption.ServerName,
 		}
 
-		if t.option.Flow != "" {
-			t.transport = gun.NewHTTP2XTLSClient(dialFn, tlsConfig)
-		} else {
-			t.transport = gun.NewHTTP2Client(dialFn, tlsConfig)
-		}
+		t.transport = gun.NewHTTP2Client(dialFn, tlsConfig)
 
 		t.gunTLSConfig = tlsConfig
 		t.gunConfig = &gun.Config{

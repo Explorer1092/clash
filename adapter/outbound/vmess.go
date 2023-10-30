@@ -21,6 +21,8 @@ import (
 	"github.com/Dreamacro/clash/transport/vmess"
 )
 
+var _ C.ProxyAdapter = (*Vmess)(nil)
+
 type Vmess struct {
 	*Base
 	client *vmess.Client
@@ -34,22 +36,23 @@ type Vmess struct {
 
 type VmessOption struct {
 	BasicOption
-	Name           string       `proxy:"name"`
-	Server         string       `proxy:"server"`
-	Port           int          `proxy:"port"`
-	UUID           string       `proxy:"uuid"`
-	AlterID        int          `proxy:"alterId"`
-	Cipher         string       `proxy:"cipher"`
-	UDP            bool         `proxy:"udp,omitempty"`
-	Network        string       `proxy:"network,omitempty"`
-	TLS            bool         `proxy:"tls,omitempty"`
-	SkipCertVerify bool         `proxy:"skip-cert-verify,omitempty"`
-	ServerName     string       `proxy:"servername,omitempty"`
-	HTTPOpts       HTTPOptions  `proxy:"http-opts,omitempty"`
-	HTTP2Opts      HTTP2Options `proxy:"h2-opts,omitempty"`
-	GrpcOpts       GrpcOptions  `proxy:"grpc-opts,omitempty"`
-	WSOpts         WSOptions    `proxy:"ws-opts,omitempty"`
-	RandomHost     bool         `proxy:"rand-host,omitempty"`
+	Name             string       `proxy:"name"`
+	Server           string       `proxy:"server"`
+	Port             int          `proxy:"port"`
+	UUID             string       `proxy:"uuid"`
+	AlterID          int          `proxy:"alterId"`
+	Cipher           string       `proxy:"cipher"`
+	UDP              bool         `proxy:"udp,omitempty"`
+	Network          string       `proxy:"network,omitempty"`
+	TLS              bool         `proxy:"tls,omitempty"`
+	SkipCertVerify   bool         `proxy:"skip-cert-verify,omitempty"`
+	ServerName       string       `proxy:"servername,omitempty"`
+	HTTPOpts         HTTPOptions  `proxy:"http-opts,omitempty"`
+	HTTP2Opts        HTTP2Options `proxy:"h2-opts,omitempty"`
+	GrpcOpts         GrpcOptions  `proxy:"grpc-opts,omitempty"`
+	WSOpts           WSOptions    `proxy:"ws-opts,omitempty"`
+	RandomHost       bool         `proxy:"rand-host,omitempty"`
+	RemoteDnsResolve bool         `proxy:"remote-dns-resolve,omitempty"`
 }
 
 type HTTPOptions struct {
@@ -203,11 +206,11 @@ func (v *Vmess) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 func (v *Vmess) StreamPacketConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	// vmess use stream-oriented udp with a special address, so we need a net.UDPAddr
 	if !metadata.Resolved() {
-		ip, err := resolver.LookupFirstIP(context.Background(), metadata.Host)
+		rAddrs, err := resolver.LookupIP(context.Background(), metadata.Host)
 		if err != nil {
-			return c, fmt.Errorf("can't resolve ip: %w", err)
+			return c, fmt.Errorf("can't resolve ip, %w", err)
 		}
-		metadata.DstIP = ip
+		metadata.DstIP = rAddrs[0]
 	}
 
 	var err error
@@ -259,11 +262,11 @@ func (v *Vmess) ListenPacketContext(ctx context.Context, metadata *C.Metadata, o
 	if v.transport != nil && len(opts) == 0 {
 		// vmess use stream-oriented udp with a special address, so we need a net.UDPAddr
 		if !metadata.Resolved() {
-			ip, err := resolver.LookupFirstIP(ctx, metadata.Host)
+			rAddrs, err := resolver.LookupIP(context.Background(), metadata.Host)
 			if err != nil {
-				return nil, fmt.Errorf("can't resolve ip: %w", err)
+				return nil, fmt.Errorf("can't resolve ip, %w", err)
 			}
-			metadata.DstIP = ip
+			metadata.DstIP = rAddrs[0]
 		}
 
 		c, err = gun.StreamGunWithTransport(v.transport, v.gunConfig)
@@ -329,6 +332,7 @@ func NewVmess(option VmessOption) (*Vmess, error) {
 			udp:   option.UDP,
 			iface: option.Interface,
 			rmark: option.RoutingMark,
+			dns:   option.RemoteDnsResolve,
 		},
 		client: client,
 		option: &option,
@@ -391,12 +395,11 @@ func parseVmessAddr(metadata *C.Metadata) *vmess.DstAddr {
 		copy(addr[1:], metadata.Host)
 	}
 
-	port, _ := strconv.ParseUint(metadata.DstPort, 10, 16)
 	return &vmess.DstAddr{
 		UDP:      metadata.NetWork == C.UDP,
 		AddrType: addrType,
 		Addr:     addr,
-		Port:     uint(port),
+		Port:     uint(metadata.DstPort),
 	}
 }
 

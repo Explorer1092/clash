@@ -20,7 +20,6 @@ import (
 	"github.com/Dreamacro/clash/adapter/outboundgroup"
 	"github.com/Dreamacro/clash/adapter/provider"
 	"github.com/Dreamacro/clash/component/auth"
-	"github.com/Dreamacro/clash/component/dialer"
 	"github.com/Dreamacro/clash/component/fakeip"
 	"github.com/Dreamacro/clash/component/geodata"
 	"github.com/Dreamacro/clash/component/geodata/router"
@@ -31,7 +30,6 @@ import (
 	C "github.com/Dreamacro/clash/constant"
 	providerTypes "github.com/Dreamacro/clash/constant/provider"
 	"github.com/Dreamacro/clash/dns"
-	"github.com/Dreamacro/clash/listener/tun/ipstack/commons"
 	L "github.com/Dreamacro/clash/log"
 	rewrites "github.com/Dreamacro/clash/rewrite"
 	R "github.com/Dreamacro/clash/rule"
@@ -40,29 +38,29 @@ import (
 
 // General config
 type General struct {
-	Inbound
+	LegacyInbound
 	Controller
-	Mode        T.TunnelMode `json:"mode"`
-	LogLevel    L.LogLevel   `json:"log-level"`
-	IPv6        bool         `json:"ipv6"`
-	Sniffing    bool         `json:"sniffing"`
-	Interface   string       `json:"-"`
-	RoutingMark int          `json:"-"`
-	Tun         Tun          `json:"tun"`
-	EBpf        EBpf         `json:"-"`
+	Authentication []string     `json:"authentication"`
+	Mode           T.TunnelMode `json:"mode"`
+	LogLevel       L.LogLevel   `json:"log-level"`
+	IPv6           bool         `json:"ipv6"`
+	Sniffing       bool         `json:"sniffing"`
+	Interface      string       `json:"-"`
+	RoutingMark    int          `json:"-"`
+	Tun            C.Tun        `json:"tun"`
+	EBpf           EBpf         `json:"-"`
 }
 
-// Inbound config
-type Inbound struct {
-	Port           int      `json:"port"`
-	SocksPort      int      `json:"socks-port"`
-	RedirPort      int      `json:"redir-port"`
-	TProxyPort     int      `json:"tproxy-port"`
-	MixedPort      int      `json:"mixed-port"`
-	MitmPort       int      `json:"mitm-port"`
-	Authentication []string `json:"authentication"`
-	AllowLan       bool     `json:"allow-lan"`
-	BindAddress    string   `json:"bind-address"`
+// LegacyInbound config
+type LegacyInbound struct {
+	Port        int    `json:"port"`
+	SocksPort   int    `json:"socks-port"`
+	RedirPort   int    `json:"redir-port"`
+	TProxyPort  int    `json:"tproxy-port"`
+	MixedPort   int    `json:"mixed-port"`
+	MitmPort    int    `json:"mitm-port"`
+	AllowLan    bool   `json:"allow-lan"`
+	BindAddress string `json:"bind-address"`
 }
 
 // Controller config
@@ -70,6 +68,7 @@ type Controller struct {
 	ExternalController string `json:"-"`
 	ExternalUI         string `json:"-"`
 	Secret             string `json:"-"`
+	PPROF              bool   `json:"-"`
 }
 
 // DNS config
@@ -79,6 +78,8 @@ type DNS struct {
 	RemoteDnsResolve      bool             `yaml:"remote-dns-resolve"`
 	NameServer            []dns.NameServer `yaml:"nameserver"`
 	Fallback              []dns.NameServer `yaml:"fallback"`
+	ProxyServerNameserver []dns.NameServer `yaml:"proxy-server-nameserver"`
+	RemoteNameserver      []dns.NameServer `yaml:"remote-nameserver"`
 	FallbackFilter        FallbackFilter   `yaml:"fallback-filter"`
 	Listen                string           `yaml:"listen"`
 	EnhancedMode          C.DNSMode        `yaml:"enhanced-mode"`
@@ -86,7 +87,7 @@ type DNS struct {
 	FakeIPRange           *fakeip.Pool
 	Hosts                 *trie.DomainTrie[netip.Addr]
 	NameServerPolicy      map[string]dns.NameServer
-	ProxyServerNameserver []dns.NameServer
+	SearchDomains         []string
 }
 
 // FallbackFilter config
@@ -105,20 +106,9 @@ type Profile struct {
 	Tracing       bool `yaml:"tracing"`
 }
 
-// Tun config
-type Tun struct {
-	Enable              bool          `yaml:"enable" json:"enable"`
-	Device              string        `yaml:"device" json:"device"`
-	Stack               C.TUNStack    `yaml:"stack" json:"stack"`
-	DNSHijack           []C.DNSUrl    `yaml:"dns-hijack" json:"dns-hijack"`
-	AutoRoute           bool          `yaml:"auto-route" json:"auto-route"`
-	AutoDetectInterface bool          `yaml:"auto-detect-interface" json:"auto-detect-interface"`
-	TunAddressPrefix    *netip.Prefix `yaml:"-" json:"-"`
-	RedirectToTun       []string      `yaml:"-" json:"-"`
-}
-
 // Script config
 type Script struct {
+	Engine        string            `yaml:"engine" json:"engine"`
 	MainCode      string            `yaml:"code" json:"code"`
 	MainPath      string            `yaml:"path" json:"path"`
 	ShortcutsCode map[string]string `yaml:"shortcuts" json:"shortcuts"`
@@ -150,6 +140,7 @@ type Config struct {
 	Experimental  *Experimental
 	Hosts         *trie.DomainTrie[netip.Addr]
 	Profile       *Profile
+	Inbounds      []C.Inbound
 	Rules         []C.Rule
 	RuleProviders map[string]C.Rule
 	Users         []auth.AuthUser
@@ -161,7 +152,7 @@ type Config struct {
 
 type RawDNS struct {
 	Enable                bool              `yaml:"enable"`
-	IPv6                  bool              `yaml:"ipv6"`
+	IPv6                  *bool             `yaml:"ipv6"`
 	RemoteDnsResolve      bool              `yaml:"remote-dns-resolve"`
 	UseHosts              bool              `yaml:"use-hosts"`
 	NameServer            []string          `yaml:"nameserver"`
@@ -174,6 +165,8 @@ type RawDNS struct {
 	DefaultNameserver     []string          `yaml:"default-nameserver"`
 	NameServerPolicy      map[string]string `yaml:"nameserver-policy"`
 	ProxyServerNameserver []string          `yaml:"proxy-server-nameserver"`
+	SearchDomains         []string          `yaml:"search-domains"`
+	RemoteNameserver      []string          `yaml:"remote-nameserver"`
 }
 
 type RawFallbackFilter struct {
@@ -247,6 +240,53 @@ func (t *Tunnel) UnmarshalYAML(unmarshal func(any) error) error {
 	return nil
 }
 
+type rawRule struct {
+	If     string    `yaml:"if"`
+	Name   string    `yaml:"name"`
+	Engine string    `yaml:"engine"`
+	Rules  []RawRule `yaml:"rules"`
+	Line   string    `yaml:"-"`
+}
+
+type RawRule rawRule
+
+// UnmarshalYAML implements yaml.Unmarshaler
+func (r *RawRule) UnmarshalYAML(unmarshal func(any) error) error {
+	var line string
+	if err := unmarshal(&line); err != nil {
+		inner := rawRule{
+			Engine: "expr",
+		}
+		if err = unmarshal(&inner); err != nil {
+			return err
+		}
+
+		if inner.Name == "" {
+			return fmt.Errorf("invalid rule name")
+		}
+
+		if inner.If == "" {
+			return fmt.Errorf("invalid rule %s if", inner.Name)
+		}
+
+		if inner.Engine != "expr" && inner.Engine != "starlark" {
+			return fmt.Errorf("invalid rule %s engine, got %s, want expr or starlark", inner.Name, inner.Engine)
+		}
+
+		if len(inner.Rules) == 0 {
+			return fmt.Errorf("rule %s sub-rules can not be empty", inner.Name)
+		}
+
+		*r = RawRule(inner)
+		return nil
+	}
+
+	*r = RawRule(rawRule{
+		Line: line,
+	})
+	return nil
+}
+
 type RawConfig struct {
 	Port               int          `yaml:"port"`
 	SocksPort          int          `yaml:"socks-port"`
@@ -263,6 +303,7 @@ type RawConfig struct {
 	ExternalController string       `yaml:"external-controller"`
 	ExternalUI         string       `yaml:"external-ui"`
 	Secret             string       `yaml:"secret"`
+	PPROF              bool         `yaml:"pprof"`
 	Interface          string       `yaml:"interface-name"`
 	RoutingMark        int          `yaml:"routing-mark"`
 	Sniffing           bool         `yaml:"sniffing"`
@@ -271,14 +312,15 @@ type RawConfig struct {
 
 	ProxyProvider map[string]map[string]any `yaml:"proxy-providers"`
 	Hosts         map[string]string         `yaml:"hosts"`
+	Inbounds      []C.Inbound               `yaml:"inbounds"`
 	DNS           RawDNS                    `yaml:"dns"`
-	Tun           Tun                       `yaml:"tun"`
+	Tun           C.Tun                     `yaml:"tun"`
 	MITM          RawMitm                   `yaml:"mitm"`
 	Experimental  Experimental              `yaml:"experimental"`
 	Profile       Profile                   `yaml:"profile"`
-	Proxy         []map[string]any          `yaml:"proxies"`
+	Proxy         []C.RawProxy              `yaml:"proxies"`
 	ProxyGroup    []map[string]any          `yaml:"proxy-groups"`
-	Rule          []string                  `yaml:"rules"`
+	Rule          []RawRule                 `yaml:"rules"`
 	Script        Script                    `yaml:"script"`
 	EBpf          EBpf                      `yaml:"ebpf"`
 }
@@ -304,10 +346,10 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 		Authentication:  []string{},
 		LogLevel:        L.INFO,
 		Hosts:           map[string]string{},
-		Rule:            []string{},
-		Proxy:           []map[string]any{},
+		Rule:            []RawRule{},
+		Proxy:           []C.RawProxy{},
 		ProxyGroup:      []map[string]any{},
-		Tun: Tun{
+		Tun: C.Tun{
 			Enable: false,
 			Device: "",
 			Stack:  C.TunGvisor,
@@ -336,7 +378,6 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 			Enable:           false,
 			UseHosts:         true,
 			RemoteDnsResolve: true,
-			EnhancedMode:     C.DNSMapping,
 			FakeIPRange:      "198.18.0.1/16",
 			FallbackFilter: RawFallbackFilter{
 				GeoIP:     true,
@@ -346,11 +387,11 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 			},
 			DefaultNameserver: []string{
 				"114.114.114.114",
-				"223.5.5.5",
+				"8.8.8.8",
 			},
-			NameServer: []string{ // default if user not set
-				"https://120.53.53.53/dns-query",
-				"tls://223.5.5.5:853",
+			RemoteNameserver: []string{
+				"tcp://1.1.1.1",
+				"tcp://8.8.8.8",
 			},
 		},
 		MITM: RawMitm{
@@ -360,6 +401,9 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 		Profile: Profile{
 			StoreSelected: true,
 			Tracing:       true,
+		},
+		Script: Script{
+			Engine: "expr",
 		},
 	}
 
@@ -374,8 +418,10 @@ func ParseRawConfig(rawCfg *RawConfig) (config *Config, err error) {
 	defer func() {
 		if err != nil {
 			providerTypes.Cleanup(config.Proxies, config.Providers)
+			config = nil
 		}
 		geodata.CleanGeoSiteCache()
+		runtime.GC()
 	}()
 
 	config = &Config{}
@@ -388,6 +434,8 @@ func ParseRawConfig(rawCfg *RawConfig) (config *Config, err error) {
 		return
 	}
 	config.General = general
+
+	config.Inbounds = rawCfg.Inbounds
 
 	proxies, providers, err := parseProxies(rawCfg)
 	if err != nil {
@@ -428,7 +476,7 @@ func ParseRawConfig(rawCfg *RawConfig) (config *Config, err error) {
 	}
 	config.Mitm = mitm
 
-	config.Users = parseAuthentication(rawCfg.Authentication)
+	config.Users = ParseAuthentication(rawCfg.Authentication)
 
 	config.Tunnels = rawCfg.Tunnels
 	// verify tunnels
@@ -470,25 +518,10 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 		}
 	}
 
-	if cfg.Tun.Enable && cfg.Tun.AutoDetectInterface {
-		outboundInterface, err := commons.GetAutoDetectInterface()
-		if err != nil && cfg.Interface == "" {
-			return nil, fmt.Errorf("get auto detect interface fail: %w", err)
-		}
-
-		if outboundInterface != "" {
-			cfg.Interface = outboundInterface
-		}
-	}
-
-	if dialer.DefaultInterface.Load() == "" {
-		dialer.DefaultInterface.Store(cfg.Interface)
-	}
-
 	cfg.Tun.RedirectToTun = cfg.EBpf.RedirectToTun
 
 	return &General{
-		Inbound: Inbound{
+		LegacyInbound: LegacyInbound{
 			Port:        cfg.Port,
 			SocksPort:   cfg.SocksPort,
 			RedirPort:   cfg.RedirPort,
@@ -502,6 +535,7 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 			ExternalController: cfg.ExternalController,
 			ExternalUI:         cfg.ExternalUI,
 			Secret:             cfg.Secret,
+			PPROF:              cfg.PPROF,
 		},
 		Mode:        cfg.Mode,
 		LogLevel:    cfg.LogLevel,
@@ -514,9 +548,9 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 	}, nil
 }
 
-func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[string]providerTypes.ProxyProvider, err error) {
-	proxies = make(map[string]C.Proxy)
-	providersMap = make(map[string]providerTypes.ProxyProvider)
+func parseProxies(cfg *RawConfig) (proxiesMap map[string]C.Proxy, pdsMap map[string]providerTypes.ProxyProvider, err error) {
+	proxies := make(map[string]C.Proxy)
+	providersMap := make(map[string]providerTypes.ProxyProvider)
 	proxiesConfig := cfg.Proxy
 	groupsConfig := cfg.ProxyGroup
 	providersConfig := cfg.ProxyProvider
@@ -528,9 +562,16 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	proxies["REJECT"] = adapter.NewProxy(outbound.NewReject())
 	proxyList = append(proxyList, "DIRECT", "REJECT")
 
+	defer func() {
+		if err != nil {
+			providerTypes.Cleanup(proxies, providersMap)
+		}
+	}()
+
 	// parse proxy
 	for idx, mapping := range proxiesConfig {
-		proxy, err := adapter.ParseProxy(mapping, forceCertVerify, false, false, false)
+		mapping.Init()
+		proxy, err := adapter.ParseProxy(mapping.M, adapter.ProxyOption{ForceCertVerify: forceCertVerify})
 		if err != nil {
 			return nil, nil, fmt.Errorf("proxy %d: %w", idx, err)
 		}
@@ -559,7 +600,9 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	// parse and initial providers
 	for name, mapping := range providersConfig {
 		if name == provider.ReservedName {
-			return nil, nil, fmt.Errorf("can not defined a provider called `%s`", provider.ReservedName)
+			return nil, nil, fmt.Errorf(
+				"can not defined a provider called `%s`", provider.ReservedName,
+			)
 		}
 
 		pd, err := provider.ParseProxyProvider(name, mapping, forceCertVerify)
@@ -573,7 +616,9 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	for _, proxyProvider := range providersMap {
 		log.Info().Str("name", proxyProvider.Name()).Msg("[Config] initial proxy provider")
 		if err := proxyProvider.Initial(); err != nil {
-			return nil, nil, fmt.Errorf("initial proxy provider %s error: %w", proxyProvider.Name(), err)
+			return nil, nil, fmt.Errorf(
+				"initial proxy provider %s error: %w", proxyProvider.Name(), err,
+			)
 		}
 	}
 
@@ -600,7 +645,9 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 
 		log.Info().Str("name", pd.Name()).Msg("[Config] initial compatible provider")
 		if err := pd.Initial(); err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf(
+				"initial compatible provider %s error: %w", pd.Name(), err,
+			)
 		}
 	}
 
@@ -609,7 +656,8 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 		ps = append(ps, proxies[v])
 	}
 	hc := provider.NewHealthCheck(ps, "", 0, true)
-	pd, _ := provider.NewCompatibleProvider(provider.ReservedName, ps, hc)
+	pd, _ := provider.NewCompatibleProvider(provider.ReservedName, hc, nil)
+	pd.SetProxies(ps)
 	providersMap[provider.ReservedName] = pd
 
 	global := outboundgroup.NewSelector(
@@ -623,16 +671,81 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 }
 
 func parseRules(cfg *RawConfig, proxies map[string]C.Proxy, matchers map[string]C.Matcher) ([]C.Rule, map[string]C.Rule, error) {
-	var (
-		rules   []C.Rule
-		foundRP bool
+	defer runtime.GC()
 
-		ruleProviders = map[string]C.Rule{}
-		rulesConfig   = cfg.Rule
-	)
+	ruleProviders := make(map[string]C.Rule)
 
-	// parse rules
-	for idx, line := range rulesConfig {
+	rules, err := parseRawRules(cfg.Rule, ruleProviders, proxies, matchers)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return rules, ruleProviders, nil
+}
+
+func parseRawRules(
+	rawRules []RawRule,
+	ruleProviders map[string]C.Rule,
+	proxies map[string]C.Proxy,
+	matchers map[string]C.Matcher,
+) ([]C.Rule, error) {
+	rules := make([]C.Rule, 0, len(rawRules))
+
+	for idx, raw := range rawRules {
+		line := raw.Line
+		if line == "" {
+			if raw.Name == "" {
+				continue
+			}
+
+			mk := "rule:" + raw.Name
+			if _, ok := matchers[mk]; ok {
+				return nil, fmt.Errorf("parse rule %s failed, rule name is exist", raw.Name)
+			}
+
+			var (
+				groupMatcher C.Matcher
+				err          error
+			)
+
+			if raw.Engine == "expr" {
+				groupMatcher, err = S.NewExprMatcher(raw.Name, raw.If)
+			} else {
+				groupMatcher, err = S.NewMatcher(raw.Name, "", raw.If)
+			}
+
+			if err != nil {
+				return nil, fmt.Errorf("parse rule %s failed, %w", raw.Name, err)
+			}
+
+			matchers[mk] = groupMatcher
+
+			subRules, err := parseRawRules(raw.Rules, ruleProviders, proxies, matchers)
+			if err != nil {
+				return nil, err
+			}
+
+			appendRuleGroupName(subRules, raw.Name)
+
+			parsed := R.NewGroup(fmt.Sprintf("%s (%s)", raw.Name, raw.If), groupMatcher, subRules)
+
+			rules = append(rules, parsed)
+
+			rpdArr := findRuleProvidersName(raw.If)
+			for _, v := range rpdArr {
+				v = strings.ToLower(v)
+				if _, ok := ruleProviders[v]; ok {
+					continue
+				}
+				rpd, err := R.NewGEOSITE(v, C.ScriptRuleGeoSiteTarget)
+				if err != nil {
+					continue
+				}
+				ruleProviders[v] = rpd
+			}
+			continue
+		}
+
 		rule := trimArr(strings.Split(line, ","))
 		var (
 			payload  string
@@ -644,7 +757,7 @@ func parseRules(cfg *RawConfig, proxies map[string]C.Proxy, matchers map[string]
 		l := len(rule)
 
 		if l < 2 {
-			return nil, nil, fmt.Errorf("rules[%d] [%s] error: format invalid", idx, line)
+			return nil, fmt.Errorf("rules[%d] [%s] error: format invalid", idx, line)
 		}
 
 		if l < 4 {
@@ -664,11 +777,11 @@ func parseRules(cfg *RawConfig, proxies map[string]C.Proxy, matchers map[string]
 		params = rule[l:]
 
 		if _, ok := proxies[target]; !ok && ruleName != "GEOSITE" && target != C.ScriptRuleGeoSiteTarget {
-			return nil, nil, fmt.Errorf("rules[%d] [%s] error: proxy [%s] not found", idx, line, target)
+			return nil, fmt.Errorf("rules[%d] [%s] error: proxy [%s] not found", idx, line, target)
 		}
 
-		pvName := payload
-		_, foundRP = ruleProviders[pvName]
+		pvName := strings.ToLower(payload)
+		_, foundRP := ruleProviders[pvName]
 		if ruleName == "GEOSITE" && target == C.ScriptRuleGeoSiteTarget && foundRP {
 			continue
 		}
@@ -677,13 +790,15 @@ func parseRules(cfg *RawConfig, proxies map[string]C.Proxy, matchers map[string]
 
 		parsed, parseErr := R.ParseRule(ruleName, payload, target, params)
 		if parseErr != nil {
-			return nil, nil, fmt.Errorf("rules[%d] [%s] error: %w", idx, line, parseErr)
+			return nil, fmt.Errorf("rules[%d] [%s] error: %w", idx, line, parseErr)
 		}
 
 		if scr, ok := parsed.(*R.Script); ok {
 			m := matchers[payload]
 			if m == nil {
-				return nil, nil, fmt.Errorf("rules[%d] [%s] error: shortcut name [%s] not found", idx, line, payload)
+				return nil, fmt.Errorf(
+					"rules[%d] [%s] error: shortcut name [%s] not found", idx, line, payload,
+				)
 			}
 			scr.SetMatcher(m)
 		}
@@ -695,9 +810,17 @@ func parseRules(cfg *RawConfig, proxies map[string]C.Proxy, matchers map[string]
 		rules = append(rules, parsed)
 	}
 
-	runtime.GC()
+	return rules, nil
+}
 
-	return rules, ruleProviders, nil
+func appendRuleGroupName(subRules []C.Rule, groupName string) {
+	for i := range subRules {
+		subRules[i].AppendGroup(groupName)
+		if subRules[i].RuleType() != C.Group {
+			continue
+		}
+		appendRuleGroupName(subRules[i].SubRules(), groupName)
+	}
 }
 
 func parseHosts(cfg *RawConfig) (*trie.DomainTrie[netip.Addr], error) {
@@ -768,7 +891,7 @@ func parseNameServer(servers []string) ([]dns.NameServer, error) {
 			addr, err = hostWithDefaultPort(u.Host, "853")
 			dnsNetType = "tcp-tls" // DNS over TLS
 		case "https":
-			clearURL := url.URL{Scheme: "https", Host: u.Host, Path: u.Path}
+			clearURL := url.URL{Scheme: "https", Host: u.Host, Path: u.Path, User: u.User}
 			addr = clearURL.String()
 			dnsNetType = "https" // DNS over HTTPS
 		case "dhcp":
@@ -785,10 +908,9 @@ func parseNameServer(servers []string) ([]dns.NameServer, error) {
 		nameservers = append(
 			nameservers,
 			dns.NameServer{
-				Net:          dnsNetType,
-				Addr:         addr,
-				ProxyAdapter: u.Fragment,
-				Interface:    dialer.DefaultInterface.Load(),
+				Net:   dnsNetType,
+				Addr:  addr,
+				Proxy: u.Fragment,
 			},
 		)
 	}
@@ -840,9 +962,11 @@ func parseFallbackGeoSite(countries []string) ([]*router.DomainMatcher, error) {
 		if recordsCount == 0 {
 			cont = "from cache"
 		}
-		log.Info().Str("country", country).Str("records", cont).Msg("[Config] initial GeoSite dns fallback filter")
+		log.Info().
+			Str("country", country).
+			Str("records", cont).
+			Msg("[Config] initial GeoSite dns fallback filter")
 	}
-	runtime.GC()
 	return sites, nil
 }
 
@@ -855,7 +979,7 @@ func parseDNS(rawCfg *RawConfig, hosts *trie.DomainTrie[netip.Addr]) (*DNS, erro
 	dnsCfg := &DNS{
 		Enable:           cfg.Enable,
 		Listen:           cfg.Listen,
-		IPv6:             cfg.IPv6,
+		IPv6:             lo.FromPtrOr(cfg.IPv6, rawCfg.IPv6),
 		EnhancedMode:     cfg.EnhancedMode,
 		RemoteDnsResolve: cfg.RemoteDnsResolve,
 		FallbackFilter: FallbackFilter{
@@ -878,6 +1002,21 @@ func parseDNS(rawCfg *RawConfig, hosts *trie.DomainTrie[netip.Addr]) (*DNS, erro
 
 	if dnsCfg.ProxyServerNameserver, err = parseNameServer(cfg.ProxyServerNameserver); err != nil {
 		return nil, err
+	}
+
+	if cfg.RemoteDnsResolve && len(cfg.RemoteNameserver) == 0 {
+		return nil, errors.New(
+			"remote nameserver should have at least one nameserver when `remote-dns-resolve` is enable",
+		)
+	}
+	if dnsCfg.RemoteNameserver, err = parseNameServer(cfg.RemoteNameserver); err != nil {
+		return nil, err
+	}
+	// check remote nameserver should not include any dhcp client
+	for _, ns := range dnsCfg.RemoteNameserver {
+		if ns.Net == "dhcp" {
+			return nil, errors.New("remote nameserver should not contain any dhcp client")
+		}
 	}
 
 	if len(cfg.DefaultNameserver) == 0 {
@@ -910,36 +1049,45 @@ func parseDNS(rawCfg *RawConfig, hosts *trie.DomainTrie[netip.Addr]) (*DNS, erro
 			"localhost.sec.qq.com",
 		}
 
+		// add all nameserver host to fake ip skip host filter
+		defaultFakeIPFilter = append(defaultFakeIPFilter,
+			lo.Filter(
+				lo.Map(
+					append(dnsCfg.NameServer,
+						append(dnsCfg.Fallback,
+							append(dnsCfg.ProxyServerNameserver, dnsCfg.RemoteNameserver...)...)...),
+					func(ns dns.NameServer, _ int) string {
+						h, _, _ := net.SplitHostPort(ns.Addr)
+						if _, err := netip.ParseAddr(h); err != nil {
+							return h
+						}
+						return ""
+					}),
+				func(s string, _ int) bool {
+					return s != ""
+				},
+			)...,
+		)
+
+		// add policy to fake ip skip host filter
+		if len(dnsCfg.NameServerPolicy) != 0 {
+			for key, policy := range dnsCfg.NameServerPolicy {
+				h, _, _ := net.SplitHostPort(policy.Addr)
+
+				if a, err := netip.ParseAddr(h); err != nil {
+					defaultFakeIPFilter = append(defaultFakeIPFilter, h)
+				} else if a.IsLoopback() || a.IsPrivate() {
+					defaultFakeIPFilter = append(defaultFakeIPFilter, key)
+				}
+			}
+		}
+
 		host := trie.New[bool]()
 
 		// fake ip skip host filter
-		if len(cfg.FakeIPFilter) != 0 {
-			for _, domain := range cfg.FakeIPFilter {
-				_ = host.Insert(domain, true)
-			}
-		}
-
-		for _, domain := range defaultFakeIPFilter {
+		fakeIPFilter := lo.Uniq(append(cfg.FakeIPFilter, defaultFakeIPFilter...))
+		for _, domain := range fakeIPFilter {
 			_ = host.Insert(domain, true)
-		}
-
-		if len(dnsCfg.Fallback) != 0 {
-			for _, fb := range dnsCfg.Fallback {
-				if net.ParseIP(fb.Addr) != nil {
-					continue
-				}
-				_ = host.Insert(fb.Addr, true)
-			}
-		}
-
-		if len(dnsCfg.NameServerPolicy) != 0 {
-			keys := lo.Keys(dnsCfg.NameServerPolicy)
-			for _, policy := range keys {
-				if net.ParseIP(policy) != nil {
-					continue
-				}
-				_ = host.Insert(policy, true)
-			}
 		}
 
 		resolver.StoreFakePoolState()
@@ -975,10 +1123,22 @@ func parseDNS(rawCfg *RawConfig, hosts *trie.DomainTrie[netip.Addr]) (*DNS, erro
 		dnsCfg.Hosts = hosts
 	}
 
+	if len(cfg.SearchDomains) != 0 {
+		for _, domain := range cfg.SearchDomains {
+			if strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
+				return nil, errors.New("search domains should not start or end with '.'")
+			}
+			if strings.Contains(domain, ":") {
+				return nil, errors.New("search domains are for ipv4 only and should not contain ports")
+			}
+		}
+		dnsCfg.SearchDomains = cfg.SearchDomains
+	}
+
 	return dnsCfg, nil
 }
 
-func parseAuthentication(rawRecords []string) []auth.AuthUser {
+func ParseAuthentication(rawRecords []string) []auth.AuthUser {
 	var users []auth.AuthUser
 	for _, line := range rawRecords {
 		if user, pass, found := strings.Cut(line, ":"); found {
@@ -988,12 +1148,17 @@ func parseAuthentication(rawRecords []string) []auth.AuthUser {
 	return users
 }
 
-func parseScript(script Script, rawRules []string) (map[string]C.Matcher, []string, error) {
+func parseScript(script Script, rawRules []RawRule) (map[string]C.Matcher, []RawRule, error) {
 	var (
+		engine        = script.Engine
 		path          = script.MainPath
 		mainCode      = script.MainCode
 		shortcutsCode = script.ShortcutsCode
 	)
+
+	if len(shortcutsCode) > 0 && engine != "expr" && engine != "starlark" {
+		return nil, nil, fmt.Errorf("invalid script shortcut engine, got %s, want expr or starlark", engine)
+	}
 
 	if path != "" {
 		if !strings.HasSuffix(path, ".star") {
@@ -1029,6 +1194,10 @@ def main(ctx, metadata):
 	matchers := make(map[string]C.Matcher)
 	matchers["main"] = matcher
 	for k, v := range shortcutsCode {
+		if _, ok := matchers[k]; ok {
+			return nil, nil, fmt.Errorf("initialized rule SCRIPT failure, shortcut name [%s] is exist", k)
+		}
+
 		v = strings.TrimSpace(v)
 		if v == "" {
 			return nil, nil, fmt.Errorf("initialized rule SCRIPT failure, shortcut [%s] code syntax invalid", k)
@@ -1036,7 +1205,12 @@ def main(ctx, metadata):
 
 		v = strings.ReplaceAll(strings.ReplaceAll(v, "\r", " "), "\n", " ")
 
-		m, err := S.NewMatcher(k, "", v)
+		var m C.Matcher
+		if engine == "expr" {
+			m, err = S.NewExprMatcher(k, v)
+		} else {
+			m, err = S.NewMatcher(k, "", v)
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("initialized script module failure, %w", err)
 		}
@@ -1047,17 +1221,20 @@ def main(ctx, metadata):
 
 	rpdArr := findRuleProvidersName(content)
 	for _, v := range rpdArr {
-		rule := fmt.Sprintf("GEOSITE,%s,%s", strings.TrimPrefix(v, "geosite:"), C.ScriptRuleGeoSiteTarget)
-		rawRules = append(rawRules, rule)
+		rule := fmt.Sprintf("GEOSITE,%s,%s", v, C.ScriptRuleGeoSiteTarget)
+		rawRules = append(rawRules, RawRule(rawRule{Line: rule}))
 	}
 
-	log.Info().Msg("[Config] initial script module successful")
+	log.Info().Str("engine", engine).Msg("[Config] initial script module successful")
 
 	return matchers, rawRules, nil
 }
 
 func cleanScriptKeywords(code string) string {
-	keywords := []string{`load\(`, `def resolve_ip\(`, `def geoip\(`, `def match_provider\(`, `def in_cidr\(`}
+	keywords := []string{
+		`load\(`, `def resolve_ip\(`, `def in_cidr\(`, `def in_ipset\(`, `def geoip\(`, `def log\(`,
+		`def match_provider\(`, `def resolve_process_name\(`, `def resolve_process_path\(`,
+	}
 
 	for _, kw := range keywords {
 		reg := regexp.MustCompile("(?m)[\r\n]+^.*" + kw + ".*$")
@@ -1083,7 +1260,7 @@ func findRuleProvidersName(s string) []string {
 		}
 	}
 
-	return rpd
+	return lo.Uniq(rpd)
 }
 
 func parseMitm(rawMitm RawMitm) (*Mitm, error) {
@@ -1137,9 +1314,20 @@ func verifyScriptMatcher(config *Config, matchers map[string]C.Matcher) (err err
 		NetWork: C.TCP,
 		Host:    "www.example.com",
 		SrcIP:   netip.MustParseAddr("198.18.0.8"),
-		SrcPort: "12345",
-		DstPort: "443",
+		SrcPort: 12345,
+		DstPort: 443,
 	}
+
+	metadata1 := &C.Metadata{
+		Type:    C.TUN,
+		NetWork: C.UDP,
+		Host:    "8.8.8.8",
+		SrcIP:   netip.MustParseAddr("192.168.1.123"),
+		SrcPort: 6789,
+		DstPort: 2023,
+	}
+
+	cases := []*C.Metadata{metadata, metadata1}
 
 	C.BackupScriptState()
 
@@ -1155,14 +1343,17 @@ func verifyScriptMatcher(config *Config, matchers map[string]C.Matcher) (err err
 	defer C.RestoreScriptState()
 
 	for k, v := range matchers {
-		if k == "main" {
-			_, err = v.Eval(metadata)
-		} else {
-			_, err = v.Match(metadata)
-		}
-		if err != nil {
-			err = fmt.Errorf("verify script code failed: %w", err)
-			return
+		isMain := k == "main"
+		for i := range cases {
+			if isMain {
+				_, err = v.Eval(cases[i])
+			} else {
+				_, err = v.Match(cases[i])
+			}
+			if err != nil {
+				err = fmt.Errorf("verify script code failed: %w", err)
+				return
+			}
 		}
 	}
 

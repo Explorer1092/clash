@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -11,6 +12,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/samber/lo"
 
+	"github.com/Dreamacro/clash/common/util"
 	"github.com/Dreamacro/clash/component/resolver"
 )
 
@@ -27,8 +29,12 @@ func queryDNS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := r.URL.Query().Get("name")
-	qTypeStr, _ := lo.Coalesce(r.URL.Query().Get("type"), "A")
+	var (
+		name     = r.URL.Query().Get("name")
+		proxy    = r.URL.Query().Get("proxy")
+		qTypeStr = util.EmptyOr(r.URL.Query().Get("type"), "A")
+		cacheStr = util.EmptyOr(r.URL.Query().Get("cache"), "1")
+	)
 
 	qType, exist := dns.StringToType[strings.ToUpper(qTypeStr)]
 	if !exist {
@@ -37,12 +43,32 @@ func queryDNS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var (
+		resp   *dns.Msg
+		source string
+		msg    = dns.Msg{}
+		cache  = true
+	)
+
+	c, err := strconv.ParseBool(cacheStr)
+	if err == nil {
+		cache = c
+	}
+
+	msg.SetQuestion(dns.Fqdn(name), qType)
+
 	ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout)
 	defer cancel()
 
-	msg := dns.Msg{}
-	msg.SetQuestion(dns.Fqdn(name), qType)
-	resp, err := resolver.DefaultResolver.ExchangeContext(ctx, &msg)
+	if proxy != "" {
+		ctx = resolver.WithProxy(ctx, proxy)
+	}
+
+	if cache {
+		resp, source, err = resolver.DefaultResolver.ExchangeContext(ctx, &msg)
+	} else {
+		resp, source, err = resolver.DefaultResolver.ExchangeContextWithoutCache(ctx, &msg)
+	}
 	if err != nil {
 		render.Status(r, http.StatusInternalServerError)
 		render.JSON(w, r, newError(err.Error()))
@@ -50,6 +76,8 @@ func queryDNS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	responseData := render.M{
+		"Server":   source,
+		"Cache":    cache,
 		"Status":   resp.Rcode,
 		"Question": resp.Question,
 		"TC":       resp.Truncated,

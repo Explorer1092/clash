@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/Dreamacro/clash/component/ebpf/byteorder"
+	"github.com/Dreamacro/clash/common/byteorder"
 	"github.com/Dreamacro/clash/component/iface"
 )
 
@@ -36,13 +36,13 @@ func bindControl(ifaceIdx int, chain controlFn) controlFn {
 		err = c.Control(func(fd uintptr) {
 			switch network {
 			case "tcp4", "udp4":
-				innerErr = bindSocketToInterface4(windows.Handle(fd), uint32(ifaceIdx))
+				innerErr = bindSocketToInterface4(windows.Handle(fd), ifaceIdx)
 			case "tcp6", "udp6":
-				innerErr = bindSocketToInterface6(windows.Handle(fd), uint32(ifaceIdx))
+				innerErr = bindSocketToInterface6(windows.Handle(fd), ifaceIdx)
 				if network == "udp6" && !addrPort.IsValid() {
 					// The underlying IP net maybe IPv4 even if the `network` param is `udp6`,
 					// so we should bind socket to interface4 at the same time.
-					innerErr = bindSocketToInterface4(windows.Handle(fd), uint32(ifaceIdx))
+					innerErr = bindSocketToInterface4(windows.Handle(fd), ifaceIdx)
 				}
 			}
 		})
@@ -55,17 +55,16 @@ func bindControl(ifaceIdx int, chain controlFn) controlFn {
 	}
 }
 
-func bindSocketToInterface4(handle windows.Handle, index uint32) error {
+func bindSocketToInterface4(handle windows.Handle, index int) error {
 	// For IPv4, this parameter must be an interface index in network byte order.
 	// Ref: https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options
 	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, index)
-	index = byteorder.Native.Uint32(buf)
-	return windows.SetsockoptInt(handle, windows.IPPROTO_IP, ipUnicastIf, int(index))
+	binary.BigEndian.PutUint32(buf, uint32(index))
+	return windows.SetsockoptInt(handle, windows.IPPROTO_IP, ipUnicastIf, int(byteorder.Native.Uint32(buf)))
 }
 
-func bindSocketToInterface6(handle windows.Handle, index uint32) error {
-	return windows.SetsockoptInt(handle, windows.IPPROTO_IPV6, ipv6UnicastIf, int(index))
+func bindSocketToInterface6(handle windows.Handle, index int) error {
+	return windows.SetsockoptInt(handle, windows.IPPROTO_IPV6, ipv6UnicastIf, index)
 }
 
 func bindIfaceToDialer(ifaceName string, dialer *net.Dialer, _ string, _ netip.Addr) error {
@@ -86,4 +85,41 @@ func bindIfaceToListenConfig(ifaceName string, lc *net.ListenConfig, _, address 
 
 	lc.Control = bindControl(ifaceObj.Index, lc.Control)
 	return address, nil
+}
+
+func WithBindToInterfaceControlFn(interfaceName string) func(network, address string, c syscall.RawConn) (err error) {
+	return func(network, address string, c syscall.RawConn) (err error) {
+		if interfaceName == "" {
+			return nil
+		}
+
+		var (
+			innerErr error
+			ifaceObj *iface.Interface
+		)
+
+		ifaceObj, err = iface.ResolveInterface(interfaceName)
+		if err != nil {
+			return
+		}
+
+		err = c.Control(func(fd uintptr) {
+			switch network {
+			case "udp4":
+				innerErr = bindSocketToInterface4(windows.Handle(fd), ifaceObj.Index)
+			case "udp6":
+				innerErr = bindSocketToInterface6(windows.Handle(fd), ifaceObj.Index)
+				if innerErr != nil {
+					innerErr = syscall.EAFNOSUPPORT
+					return
+				}
+			}
+		})
+
+		if innerErr != nil {
+			err = innerErr
+		}
+
+		return
+	}
 }

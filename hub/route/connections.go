@@ -1,7 +1,6 @@
 package route
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -11,6 +10,7 @@ import (
 	"github.com/go-chi/render"
 	"github.com/gorilla/websocket"
 
+	"github.com/Dreamacro/clash/common/pool"
 	"github.com/Dreamacro/clash/tunnel/statistic"
 )
 
@@ -35,23 +35,27 @@ func getConnections(w http.ResponseWriter, r *http.Request) {
 	}
 
 	intervalStr := r.URL.Query().Get("interval")
-	interval := 1000
+	interval := 1000 * time.Millisecond
 	if intervalStr != "" {
-		t, err := strconv.Atoi(intervalStr)
+		t, err := strconv.ParseInt(intervalStr, 10, 64)
 		if err != nil {
-			render.Status(r, http.StatusBadRequest)
-			render.JSON(w, r, ErrBadRequest)
-			return
+			d, err := time.ParseDuration(intervalStr)
+			if err != nil {
+				render.Status(r, http.StatusBadRequest)
+				render.JSON(w, r, ErrBadRequest)
+				return
+			}
+			interval = d
+		} else {
+			interval = time.Duration(t) * time.Millisecond
 		}
-
-		interval = t
 	}
 
-	buf := &bytes.Buffer{}
+	buf := pool.BufferWriter{}
 	sendSnapshot := func() error {
 		buf.Reset()
 		snapshot := statistic.DefaultManager.Snapshot()
-		if err := json.NewEncoder(buf).Encode(snapshot); err != nil {
+		if err := json.NewEncoder(&buf).Encode(snapshot); err != nil {
 			return err
 		}
 
@@ -62,7 +66,7 @@ func getConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tick := time.NewTicker(time.Millisecond * time.Duration(interval))
+	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for range tick.C {
 		if err := sendSnapshot(); err != nil {
@@ -76,7 +80,7 @@ func closeConnection(w http.ResponseWriter, r *http.Request) {
 	snapshot := statistic.DefaultManager.Snapshot()
 	for _, c := range snapshot.Connections {
 		if id == c.ID() {
-			c.Close()
+			_ = c.Close()
 			break
 		}
 	}
@@ -86,7 +90,7 @@ func closeConnection(w http.ResponseWriter, r *http.Request) {
 func closeAllConnections(w http.ResponseWriter, r *http.Request) {
 	snapshot := statistic.DefaultManager.Snapshot()
 	for _, c := range snapshot.Connections {
-		c.Close()
+		_ = c.Close()
 	}
 	render.NoContent(w, r)
 }

@@ -75,9 +75,9 @@ func (t Type) String() string {
 	case TPROXY:
 		return "TProxy"
 	case TUN:
-		return "Tun"
+		return "TUN"
 	case MITM:
-		return "Mitm"
+		return "MITM"
 	case TUNNEL:
 		return "Tunnel"
 	default:
@@ -95,32 +95,34 @@ type Metadata struct {
 	Type         Type       `json:"type"`
 	SrcIP        netip.Addr `json:"sourceIP"`
 	DstIP        netip.Addr `json:"destinationIP"`
-	SrcPort      string     `json:"sourcePort"`
-	DstPort      string     `json:"destinationPort"`
+	SrcPort      Port       `json:"sourcePort"`
+	DstPort      Port       `json:"destinationPort"`
 	Host         string     `json:"host"`
 	DNSMode      DNSMode    `json:"dnsMode"`
 	Process      string     `json:"process"`
 	ProcessPath  string     `json:"processPath"`
 	UserAgent    string     `json:"userAgent"`
 	SpecialProxy string     `json:"specialProxy"`
+
+	OriginDst netip.AddrPort `json:"-"`
 }
 
 func (m *Metadata) RemoteAddress() string {
-	return net.JoinHostPort(m.String(), m.DstPort)
+	return net.JoinHostPort(m.String(), m.DstPort.String())
 }
 
 func (m *Metadata) SourceAddress() string {
-	return net.JoinHostPort(m.SrcIP.String(), m.SrcPort)
+	return net.JoinHostPort(m.SrcIP.String(), m.SrcPort.String())
 }
 
 func (m *Metadata) AddrType() int {
 	switch true {
-	case m.Host != "" || !m.Resolved():
-		return socks5.AtypDomainName
 	case m.DstIP.Is4():
 		return socks5.AtypIPv4
-	default:
+	case m.DstIP.Is6():
 		return socks5.AtypIPv6
+	default:
+		return socks5.AtypDomainName
 	}
 }
 
@@ -128,26 +130,13 @@ func (m *Metadata) Resolved() bool {
 	return m.DstIP.IsValid()
 }
 
-// Pure is used to solve unexpected behavior
-// when dialing proxy connection in DNSMapping mode.
-func (m *Metadata) Pure(isMitmOutbound bool) *Metadata {
-	if !isMitmOutbound && m.DNSMode == DNSMapping && m.DstIP.IsValid() {
-		copyM := *m
-		copyM.Host = ""
-		return &copyM
-	}
-
-	return m
-}
-
 func (m *Metadata) UDPAddr() *net.UDPAddr {
 	if m.NetWork != UDP || !m.DstIP.IsValid() {
 		return nil
 	}
-	port, _ := strconv.ParseUint(m.DstPort, 10, 16)
 	return &net.UDPAddr{
 		IP:   m.DstIP.AsSlice(),
-		Port: int(port),
+		Port: int(m.DstPort),
 	}
 }
 
@@ -194,4 +183,15 @@ func (m *Metadata) MarshalObject(e *log.Entry) {
 	if m.UserAgent != "" {
 		e.Str("userAgent", m.UserAgent)
 	}
+}
+
+// Port is used to compatible with old version
+type Port uint16
+
+func (n Port) MarshalJSON() ([]byte, error) {
+	return json.Marshal(n.String())
+}
+
+func (n Port) String() string {
+	return strconv.FormatUint(uint64(n), 10)
 }

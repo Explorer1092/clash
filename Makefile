@@ -24,6 +24,7 @@ PLATFORM_LIST = \
 	linux-mips64 \
 	linux-mips64le \
 	linux-riscv64 \
+	linux-loong64 \
 	freebsd-386 \
 	freebsd-amd64 \
 	freebsd-amd64-v3 \
@@ -92,6 +93,9 @@ linux-mips64le:
 linux-riscv64:
 	GOARCH=riscv64 GOOS=linux $(GOBUILD) -o $(BINDIR)/$(NAME)-$@
 
+linux-loong64:
+	GOARCH=loong64 GOOS=linux $(GOBUILD) -o $(BINDIR)/$(NAME)-$@
+
 freebsd-386:
 	GOARCH=386 GOOS=freebsd $(GOBUILD) -o $(BINDIR)/$(NAME)-$@
 
@@ -136,12 +140,15 @@ releases: $(gz_releases) $(zip_releases)
 vet:
 	go test ./...
 
-lint:
-	GOOS=darwin golangci-lint run ./...
-	GOOS=windows golangci-lint run ./...
-	GOOS=linux golangci-lint run ./...
-	GOOS=freebsd golangci-lint run ./...
-	GOOS=openbsd golangci-lint run ./...
+lint_os_list := darwin windows linux freebsd openbsd
+
+lint: $(foreach os,$(lint_os_list),$(os)-lint)
+%-lint:
+	GOOS=$* golangci-lint run --timeout=3m ./...
+
+lint-fix: $(foreach os,$(lint_os_list),$(os)-lint-fix)
+%-lint-fix:
+	GOOS=$* golangci-lint run --timeout=3m --fix ./...
 
 clean:
 	rm -rf $(BINDIR)/*

@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"net"
+	"net/netip"
 
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/context"
@@ -9,16 +10,19 @@ import (
 )
 
 // NewMitm receive mitm request and return MitmContext
-func NewMitm(target socks5.Addr, source net.Addr, userAgent string, specialProxy string, conn net.Conn) *context.ConnContext {
+func NewMitm(target socks5.Addr, source net.Addr, originTarget net.Addr, userAgent string, specialProxy string, conn net.Conn) *context.ConnContext {
 	metadata := parseSocksAddr(target)
 	metadata.NetWork = C.TCP
 	metadata.Type = C.MITM
 	metadata.UserAgent = userAgent
 	metadata.SpecialProxy = specialProxy
 
-	if ip, port, err := parseAddr(source.String()); err == nil {
+	if ip, port, err := parseAddr(source); err == nil {
 		metadata.SrcIP = ip
-		metadata.SrcPort = port
+		metadata.SrcPort = C.Port(port)
+	}
+	if ip, port, err := parseAddr(originTarget); err == nil {
+		metadata.OriginDst = netip.AddrPortFrom(ip, uint16(port))
 	}
 	return context.NewConnContext(conn, metadata)
 }

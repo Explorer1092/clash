@@ -5,10 +5,10 @@ import (
 	"crypto/md5"
 	"os"
 	"path/filepath"
-	"regexp"
 	"time"
 
 	"github.com/phuslu/log"
+	"github.com/samber/lo"
 
 	types "github.com/Dreamacro/clash/constant/provider"
 )
@@ -16,8 +16,6 @@ import (
 var (
 	fileMode os.FileMode = 0o666
 	dirMode  os.FileMode = 0o755
-
-	commentRegx = regexp.MustCompile(`(.*#.*\n)`)
 )
 
 type parser[V any] func([]byte) (V, error)
@@ -28,6 +26,7 @@ type fetcher[V any] struct {
 	interval  time.Duration
 	updatedAt *time.Time
 	ticker    *time.Ticker
+	tmUpdate  *time.Timer
 	done      chan struct{}
 	hash      [16]byte
 	parser    parser[V]
@@ -46,6 +45,7 @@ func (f *fetcher[V]) Initial() (V, error) {
 	var (
 		buf               []byte
 		err               error
+		elm               V
 		isLocal           bool
 		immediatelyUpdate bool
 	)
@@ -54,30 +54,41 @@ func (f *fetcher[V]) Initial() (V, error) {
 		modTime := stat.ModTime()
 		f.updatedAt = &modTime
 		isLocal = true
-		immediatelyUpdate = f.interval != 0 && time.Since(modTime) > f.interval<<2
+		immediatelyUpdate = f.interval != 0 && time.Since(modTime) > f.interval
 	} else {
+		// delay fetch for using proxy
+		if f.vehicle.Proxy() {
+			immediatelyUpdate = true
+			goto end
+		}
 		buf, err = f.vehicle.Read()
 	}
 
 	if err != nil {
-		return getZero[V](), err
+		return lo.Empty[V](), err
 	}
 
-	proxies, err := f.parser(buf)
+	elm, err = f.parser(buf)
 	if err != nil {
 		if !isLocal {
-			return getZero[V](), err
+			return lo.Empty[V](), err
+		}
+
+		// delay fetch for using proxy
+		if f.vehicle.Proxy() {
+			immediatelyUpdate = true
+			goto end
 		}
 
 		// parse local file error, fallback to remote
 		buf, err = f.vehicle.Read()
 		if err != nil {
-			return getZero[V](), err
+			return lo.Empty[V](), err
 		}
 
-		proxies, err = f.parser(buf)
+		elm, err = f.parser(buf)
 		if err != nil {
-			return getZero[V](), err
+			return lo.Empty[V](), err
 		}
 
 		isLocal = false
@@ -85,24 +96,25 @@ func (f *fetcher[V]) Initial() (V, error) {
 
 	if f.vehicle.Type() != types.File && !isLocal {
 		if err := safeWrite(f.vehicle.Path(), buf); err != nil {
-			return getZero[V](), err
+			return lo.Empty[V](), err
 		}
 	}
 
 	f.hash = md5.Sum(buf)
 
-	// pull proxies automatically
-	if f.ticker != nil {
+end:
+	// pull element automatically
+	if f.vehicle.Type() != types.File {
 		go f.pullLoop(immediatelyUpdate)
 	}
 
-	return proxies, nil
+	return elm, nil
 }
 
 func (f *fetcher[V]) Update() (V, bool, error) {
 	buf, err := f.vehicle.Read()
 	if err != nil {
-		return getZero[V](), false, err
+		return lo.Empty[V](), false, err
 	}
 
 	now := time.Now()
@@ -110,17 +122,17 @@ func (f *fetcher[V]) Update() (V, bool, error) {
 	if bytes.Equal(f.hash[:], hash[:]) {
 		f.updatedAt = &now
 		_ = os.Chtimes(f.vehicle.Path(), now, now)
-		return getZero[V](), true, nil
+		return lo.Empty[V](), true, nil
 	}
 
 	proxies, err := f.parser(buf)
 	if err != nil {
-		return getZero[V](), false, err
+		return lo.Empty[V](), false, err
 	}
 
 	if f.vehicle.Type() != types.File {
 		if err := safeWrite(f.vehicle.Path(), buf); err != nil {
-			return getZero[V](), false, err
+			return lo.Empty[V](), false, err
 		}
 	}
 
@@ -131,6 +143,10 @@ func (f *fetcher[V]) Update() (V, bool, error) {
 }
 
 func (f *fetcher[V]) Destroy() error {
+	if f.tmUpdate != nil {
+		f.tmUpdate.Stop()
+		f.tmUpdate = nil
+	}
 	if f.ticker != nil {
 		select {
 		case f.done <- struct{}{}:
@@ -161,7 +177,17 @@ func (f *fetcher[V]) pullLoop(immediately bool) {
 	}
 
 	if immediately {
-		update()
+		if f.tmUpdate != nil {
+			f.tmUpdate.Stop()
+		}
+		f.tmUpdate = time.AfterFunc(50*time.Second, func() {
+			update()
+			f.tmUpdate = nil
+		})
+	}
+
+	if f.ticker == nil {
+		return
 	}
 
 	for {
@@ -187,19 +213,10 @@ func safeWrite(path string, buf []byte) error {
 	return os.WriteFile(path, buf, fileMode)
 }
 
-func removeComment(buf []byte) []byte {
-	arr := commentRegx.FindAllSubmatch(buf, -1)
-	for _, subs := range arr {
-		sub := subs[0]
-		if !bytes.HasPrefix(bytes.TrimLeft(sub, " 	"), []byte("#")) {
-			continue
-		}
-		buf = bytes.Replace(buf, sub, []byte(""), 1)
-	}
-	return buf
-}
-
 func newFetcher[V any](name string, interval time.Duration, vehicle types.Vehicle, parser parser[V], onUpdate func(V)) *fetcher[V] {
+	if interval < 0 {
+		interval = 0
+	}
 	var ticker *time.Ticker
 	if interval != 0 {
 		ticker = time.NewTicker(interval)
@@ -214,9 +231,4 @@ func newFetcher[V any](name string, interval time.Duration, vehicle types.Vehicl
 		done:     make(chan struct{}, 1),
 		onUpdate: onUpdate,
 	}
-}
-
-func getZero[V any]() V {
-	var result V
-	return result
 }

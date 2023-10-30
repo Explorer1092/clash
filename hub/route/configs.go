@@ -2,20 +2,20 @@ package route
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
 	"github.com/phuslu/log"
+	"github.com/samber/lo"
 
-	"github.com/Dreamacro/clash/component/dialer"
 	"github.com/Dreamacro/clash/component/resolver"
 	"github.com/Dreamacro/clash/config"
-	"github.com/Dreamacro/clash/constant"
+	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/hub/executor"
-	P "github.com/Dreamacro/clash/listener"
-	"github.com/Dreamacro/clash/listener/tun/ipstack/commons"
+	"github.com/Dreamacro/clash/listener"
 	L "github.com/Dreamacro/clash/log"
 	"github.com/Dreamacro/clash/tunnel"
 )
@@ -33,15 +33,15 @@ func getConfigs(w http.ResponseWriter, r *http.Request) {
 	render.JSON(w, r, general)
 }
 
-func pointerOrDefault(p *int, def int) int {
-	if p != nil {
-		return *p
-	}
-
-	return def
-}
-
 func patchConfigs(w http.ResponseWriter, r *http.Request) {
+	type tun struct {
+		Enable              *bool       `json:"enable,omitempty"`
+		Device              *string     `json:"device,omitempty"`
+		Stack               *C.TUNStack `json:"stack,omitempty"`
+		DNSHijack           *[]C.DNSUrl `json:"dns-hijack,omitempty"`
+		AutoRoute           *bool       `json:"auto-route,omitempty"`
+		AutoDetectInterface *bool       `json:"auto-detect-interface,omitempty"`
+	}
 	general := struct {
 		Port        *int               `json:"port,omitempty"`
 		SocksPort   *int               `json:"socks-port,omitempty"`
@@ -55,15 +55,9 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 		LogLevel    *L.LogLevel        `json:"log-level,omitempty"`
 		IPv6        *bool              `json:"ipv6,omitempty"`
 		Sniffing    *bool              `json:"sniffing,omitempty"`
-		Tun         *struct {
-			Enable              *bool              `json:"enable,omitempty"`
-			Device              *string            `json:"device,omitempty"`
-			Stack               *constant.TUNStack `json:"stack,omitempty"`
-			DNSHijack           *[]constant.DNSUrl `json:"dns-hijack,omitempty"`
-			AutoRoute           *bool              `json:"auto-route,omitempty"`
-			AutoDetectInterface *bool              `json:"auto-detect-interface,omitempty"`
-		}
+		Tun         *tun               `json:"tun,omitempty"`
 	}{}
+
 	if err := render.DecodeJSON(r.Body, &general); err != nil {
 		render.Status(r, http.StatusBadRequest)
 		render.JSON(w, r, ErrBadRequest)
@@ -71,24 +65,12 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if general.AllowLan != nil {
-		P.SetAllowLan(*general.AllowLan)
+		listener.SetAllowLan(*general.AllowLan)
 	}
 
 	if general.BindAddress != nil {
-		P.SetBindAddress(*general.BindAddress)
+		listener.SetBindAddress(*general.BindAddress)
 	}
-
-	ports := P.GetPorts()
-
-	tcpIn := tunnel.TCPIn()
-	udpIn := tunnel.UDPIn()
-
-	P.ReCreateHTTP(pointerOrDefault(general.Port, ports.Port), tcpIn)
-	P.ReCreateSocks(pointerOrDefault(general.SocksPort, ports.SocksPort), tcpIn, udpIn)
-	P.ReCreateRedir(pointerOrDefault(general.RedirPort, ports.RedirPort), tcpIn, udpIn)
-	P.ReCreateTProxy(pointerOrDefault(general.TProxyPort, ports.TProxyPort), tcpIn, udpIn)
-	P.ReCreateMixed(pointerOrDefault(general.MixedPort, ports.MixedPort), tcpIn, udpIn)
-	P.ReCreateMitm(pointerOrDefault(general.MitmPort, ports.MitmPort), tcpIn)
 
 	if general.Mode != nil {
 		tunnel.SetMode(*general.Mode)
@@ -99,45 +81,40 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if general.IPv6 != nil {
-		resolver.DisableIPv6 = !*general.IPv6
+		resolver.SetDisableIPv6(!*general.IPv6)
 	}
 
 	if general.Sniffing != nil {
 		tunnel.SetSniffing(*general.Sniffing)
 	}
 
+	tcpIn := tunnel.TCPIn()
+	udpIn := tunnel.UDPIn()
+
+	ports := listener.GetPorts()
+	ports.Port = lo.FromPtrOr(general.Port, ports.Port)
+	ports.SocksPort = lo.FromPtrOr(general.SocksPort, ports.SocksPort)
+	ports.RedirPort = lo.FromPtrOr(general.RedirPort, ports.RedirPort)
+	ports.TProxyPort = lo.FromPtrOr(general.TProxyPort, ports.TProxyPort)
+	ports.MixedPort = lo.FromPtrOr(general.MixedPort, ports.MixedPort)
+	ports.MitmPort = lo.FromPtrOr(general.MitmPort, ports.MitmPort)
+
+	listener.ReCreatePortsListeners(*ports, tcpIn, udpIn)
+
 	if general.Tun != nil {
 		tunSchema := general.Tun
-		tunConf := P.GetTunConf()
+		tunConf := C.GetTunConf()
+		tunConf.StopRouteListener = true
 
-		if tunSchema.Enable != nil {
-			tunConf.Enable = *tunSchema.Enable
-		}
-		if tunSchema.Device != nil {
-			tunConf.Device = *tunSchema.Device
-		}
-		if tunSchema.Stack != nil {
-			tunConf.Stack = *tunSchema.Stack
-		}
-		if tunSchema.DNSHijack != nil {
-			tunConf.DNSHijack = *tunSchema.DNSHijack
-		}
-		if tunSchema.AutoRoute != nil {
-			tunConf.AutoRoute = *tunSchema.AutoRoute
-		}
-		if tunSchema.AutoDetectInterface != nil {
-			tunConf.AutoDetectInterface = *tunSchema.AutoDetectInterface
-		}
+		tunConf.Enable = lo.FromPtrOr(tunSchema.Enable, tunConf.Enable)
+		tunConf.Device = lo.FromPtrOr(tunSchema.Device, tunConf.Device)
+		tunConf.Stack = lo.FromPtrOr(tunSchema.Stack, tunConf.Stack)
+		tunConf.DNSHijack = lo.FromPtrOr(tunSchema.DNSHijack, tunConf.DNSHijack)
+		tunConf.AutoRoute = lo.FromPtrOr(tunSchema.AutoRoute, tunConf.AutoRoute)
+		tunConf.AutoDetectInterface = lo.FromPtrOr(tunSchema.AutoDetectInterface, tunConf.AutoDetectInterface)
 
-		if dialer.DefaultInterface.Load() == "" && tunConf.Enable {
-			outboundInterface, _ := commons.GetAutoDetectInterface()
-			if outboundInterface != "" {
-				dialer.DefaultInterface.Store(outboundInterface)
-			}
-		}
-
-		P.ReCreateTun(&tunConf, tcpIn, udpIn)
-		P.ReCreateRedirToTun(tunConf.RedirectToTun)
+		listener.ReCreateTun(&tunConf, tcpIn, udpIn)
+		listener.ReCreateRedirToTun(tunConf.RedirectToTun)
 	}
 
 	msg, _ := json.Marshal(general)
@@ -157,31 +134,69 @@ func updateConfigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	force := r.URL.Query().Get("force") == "true"
-	var cfg *config.Config
-	var err error
+	var (
+		cfg      *config.Config
+		err      error
+		hasPath  bool
+		oldLevel = L.Level()
+		force    = r.URL.Query().Get("force") == "true"
+	)
+
+	defer func() {
+		if err == nil {
+			oldLevel = L.Level()
+			L.SetLevel(L.INFO)
+			if req.Payload != "" {
+				log.Info().Msg("[API] payload config updated")
+			} else {
+				if hasPath {
+					C.SetConfig(req.Path)
+				}
+				log.Info().Str("path", req.Path).Msg("[API] configuration file reloaded")
+			}
+		}
+		L.SetLevel(oldLevel)
+	}()
+
+	L.SetLevel(L.INFO)
 
 	if req.Payload != "" {
-		log.Warn().Msg("[API] update config by payload")
+		log.Info().Msg("[API] payload config updating...")
+
 		cfg, err = executor.ParseWithBytes([]byte(req.Payload))
 		if err != nil {
+			log.Error().Err(err).Msg("[API] update config failed")
+
 			render.Status(r, http.StatusBadRequest)
 			render.JSON(w, r, newError(err.Error()))
 			return
 		}
 	} else {
-		if req.Path == "" {
-			req.Path = constant.Path.Config()
+		if hasPath = req.Path != ""; !hasPath {
+			req.Path = C.Path.Config()
 		}
+
+		log.Info().Str("path", req.Path).Msg("[API] configuration file reloading...")
+
 		if !filepath.IsAbs(req.Path) {
+			err = errors.New("path is not a absolute path")
+			log.Error().
+				Err(err).
+				Str("path", req.Path).
+				Msg("[API] reload config failed")
+
 			render.Status(r, http.StatusBadRequest)
-			render.JSON(w, r, newError("path is not a absolute path"))
+			render.JSON(w, r, newError(err.Error()))
 			return
 		}
 
-		log.Warn().Str("file", req.Path).Msg("[API] reload config")
 		cfg, err = executor.ParseWithPath(req.Path)
 		if err != nil {
+			log.Error().
+				Err(err).
+				Str("path", req.Path).
+				Msg("[API] reload config failed")
+
 			render.Status(r, http.StatusBadRequest)
 			render.JSON(w, r, newError(err.Error()))
 			return

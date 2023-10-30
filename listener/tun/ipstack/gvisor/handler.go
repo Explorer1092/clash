@@ -40,7 +40,7 @@ func (gh *gvHandler) HandleTCP(tunConn net.Conn) {
 	}
 
 	if !lAddrPort.IsValid() || !rAddrPort.IsValid() {
-		log.Debug().Msg("[gVisor] tcp endpoint not connected")
+		log.Debug().Msg("[GVisor] tcp endpoint not connected")
 		_ = tunConn.Close()
 		return
 	}
@@ -53,8 +53,7 @@ func (gh *gvHandler) HandleTCP(tunConn net.Conn) {
 				_ = c.Close()
 			}(dnsConn)
 
-			var err1 error
-			err1 = dnsConn.SetReadDeadline(time.Now().Add(C.DefaultTCPTimeout))
+			err1 := dnsConn.SetReadDeadline(time.Now().Add(C.DefaultTCPTimeout))
 			if err1 != nil {
 				return
 			}
@@ -62,12 +61,11 @@ func (gh *gvHandler) HandleTCP(tunConn net.Conn) {
 			buf := pool.NewBuffer()
 			defer buf.Release()
 
-			_, err1 = buf.ReadFullFrom(dnsConn, 2)
+			length, err1 := buf.ReadUint16be(dnsConn)
 			if err1 != nil {
 				return
 			}
 
-			length := binary.BigEndian.Uint16(buf.Next(2))
 			_, err1 = buf.ReadFullFrom(dnsConn, int64(length))
 			if err1 != nil {
 				return
@@ -100,23 +98,23 @@ func (gh *gvHandler) HandleTCP(tunConn net.Conn) {
 func (gh *gvHandler) HandleUDP(stack *stack.Stack, id stack.TransportEndpointID, pkt stack.PacketBufferPtr) {
 	defer pkt.DecRef()
 
-	rAddr, _ := netip.AddrFromSlice(([]byte)(id.LocalAddress))
-	if !rAddr.IsValid() {
-		log.Debug().Msg("[gVisor] udp endpoint not connected")
+	rAddr, ok := netip.AddrFromSlice(id.LocalAddress.AsSlice())
+	if !ok {
+		log.Debug().Msg("[GVisor] udp endpoint not connected")
 		return
 	}
-	rAddrPort := netip.AddrPortFrom(rAddr, id.LocalPort)
+	rAddrPort := netip.AddrPortFrom(rAddr.Unmap(), id.LocalPort)
 
-	if rAddrPort.Addr() == gh.gateway || rAddrPort.Addr() == gh.broadcast {
+	if rAddrPort.Addr() == gh.gateway {
 		return
 	}
 
-	lAddr, _ := netip.AddrFromSlice(([]byte)(id.RemoteAddress))
-	if !lAddr.IsValid() {
-		log.Debug().Msg("[gVisor] udp endpoint not connected")
+	lAddr, ok := netip.AddrFromSlice(id.RemoteAddress.AsSlice())
+	if !ok {
+		log.Debug().Msg("[GVisor] udp endpoint not connected")
 		return
 	}
-	lAddrPort := netip.AddrPortFrom(lAddr, id.RemotePort)
+	lAddrPort := netip.AddrPortFrom(lAddr.Unmap(), id.RemotePort)
 
 	data := pkt.ToView()
 	headerSize := pkt.HeaderSize()
@@ -146,7 +144,6 @@ func (gh *gvHandler) HandleUDP(stack *stack.Stack, id stack.TransportEndpointID,
 
 			_, _ = conn.Write(msg)
 			_ = conn.Close()
-			return
 		}()
 		return
 	}
@@ -164,7 +161,7 @@ func (gh *gvHandler) HandleUDP(stack *stack.Stack, id stack.TransportEndpointID,
 		log.Debug().
 			NetIPAddrPort("lAddrPort", lAddrPort).
 			NetIPAddrPort("rAddrPort", rAddrPort).
-			Msg("[gVisor] drop udp packet, because inbound queue is full")
+			Msg("[GVisor] drop udp packet, because inbound queue is full")
 		udpPkt.Drop()
 	}
 }

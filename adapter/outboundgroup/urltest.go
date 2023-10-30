@@ -20,10 +20,13 @@ func urlTestWithTolerance(tolerance uint16) urlTestOption {
 	}
 }
 
+var _ C.ProxyAdapter = (*URLTest)(nil)
+
 type URLTest struct {
 	*outbound.Base
 	tolerance  uint16
 	disableUDP bool
+	disableDNS bool
 	fastNode   C.Proxy
 	single     *singledo.Single[[]C.Proxy]
 	fastSingle *singledo.Single[C.Proxy]
@@ -69,7 +72,7 @@ func (u *URLTest) fast(touch bool) C.Proxy {
 	proxy, _, flag := u.fastSingle.Do(func() (C.Proxy, error) {
 		proxies := u.proxies(touch)
 		fast := proxies[0]
-		min := fast.LastDelay()
+		minDelay := fast.LastDelay()
 		fastNotExist := true
 
 		for _, proxy := range proxies[1:] {
@@ -82,9 +85,9 @@ func (u *URLTest) fast(touch bool) C.Proxy {
 			}
 
 			delay := proxy.LastDelay()
-			if delay < min {
+			if delay < minDelay {
 				fast = proxy
-				min = delay
+				minDelay = delay
 			}
 		}
 
@@ -112,6 +115,11 @@ func (u *URLTest) SupportUDP() bool {
 	return u.fast(false).SupportUDP()
 }
 
+// DisableDnsResolve implements C.DisableDnsResolve
+func (u *URLTest) DisableDnsResolve() bool {
+	return u.disableDNS
+}
+
 // MarshalJSON implements C.ProxyAdapter
 func (u *URLTest) MarshalJSON() ([]byte, error) {
 	var all []string
@@ -125,12 +133,22 @@ func (u *URLTest) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// Cleanup implements C.ProxyAdapter
+func (u *URLTest) Cleanup() {
+	u.single.Reset()
+}
+
 func parseURLTestOption(config map[string]any) []urlTestOption {
-	opts := []urlTestOption{}
+	var opts []urlTestOption
 
 	// tolerance
-	if tolerance, ok := config["tolerance"].(int); ok {
+	switch tolerance := config["tolerance"].(type) {
+	case int:
 		opts = append(opts, urlTestWithTolerance(uint16(tolerance)))
+	case string:
+		if dur, err := time.ParseDuration(tolerance); err == nil {
+			opts = append(opts, urlTestWithTolerance(uint16(dur.Milliseconds())))
+		}
 	}
 
 	return opts
@@ -145,13 +163,14 @@ func NewURLTest(option *GroupCommonOption, providers []provider.ProxyProvider, o
 			RoutingMark: option.RoutingMark,
 		}),
 		single:     singledo.NewSingle[[]C.Proxy](defaultGetProxiesDuration),
-		fastSingle: singledo.NewSingle[C.Proxy](time.Second * 10),
+		fastSingle: singledo.NewSingle[C.Proxy](time.Second),
 		providers:  providers,
 		disableUDP: option.DisableUDP,
+		disableDNS: option.DisableDNS,
 	}
 
-	for _, option := range options {
-		option(urlTest)
+	for _, opt := range options {
+		opt(urlTest)
 	}
 
 	return urlTest

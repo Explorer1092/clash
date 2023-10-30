@@ -5,9 +5,12 @@ import (
 	"net"
 	"time"
 
+	"github.com/Dreamacro/clash/component/auth"
 	"github.com/Dreamacro/clash/component/dialer"
 	C "github.com/Dreamacro/clash/constant"
 )
+
+var _ C.ProxyAdapter = (*Mitm)(nil)
 
 type Mitm struct {
 	*Base
@@ -36,14 +39,23 @@ func (m *Mitm) DialContext(_ context.Context, metadata *C.Metadata, _ ...dialer.
 	return NewConn(hc, m), nil
 }
 
-func NewMitm(serverAddr string) *Mitm {
-	tcpAddr, _ := net.ResolveTCPAddr("tcp", serverAddr)
+func NewMitm(serverAddr string, auths auth.Authenticator) *Mitm {
+	var (
+		option     = HttpOption{}
+		tcpAddr, _ = net.ResolveTCPAddr("tcp", serverAddr)
+	)
+	if auths != nil {
+		if user := auths.RandomUser(); user != nil {
+			option.UserName = user.User
+			option.Password = user.Pass
+		}
+	}
 	return &Mitm{
 		Base: &Base{
 			name: "Mitm",
 			tp:   C.Mitm,
 		},
 		serverAddr:      tcpAddr,
-		httpProxyClient: NewHttp(HttpOption{}),
+		httpProxyClient: NewHttp(option),
 	}
 }

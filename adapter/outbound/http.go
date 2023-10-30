@@ -17,23 +17,28 @@ import (
 	C "github.com/Dreamacro/clash/constant"
 )
 
+var _ C.ProxyAdapter = (*Http)(nil)
+
 type Http struct {
 	*Base
 	user      string
 	pass      string
 	tlsConfig *tls.Config
+	headers   http.Header
 }
 
 type HttpOption struct {
 	BasicOption
-	Name           string `proxy:"name"`
-	Server         string `proxy:"server"`
-	Port           int    `proxy:"port"`
-	UserName       string `proxy:"username,omitempty"`
-	Password       string `proxy:"password,omitempty"`
-	TLS            bool   `proxy:"tls,omitempty"`
-	SNI            string `proxy:"sni,omitempty"`
-	SkipCertVerify bool   `proxy:"skip-cert-verify,omitempty"`
+	Name             string            `proxy:"name"`
+	Server           string            `proxy:"server"`
+	Port             int               `proxy:"port"`
+	UserName         string            `proxy:"username,omitempty"`
+	Password         string            `proxy:"password,omitempty"`
+	TLS              bool              `proxy:"tls,omitempty"`
+	SNI              string            `proxy:"sni,omitempty"`
+	SkipCertVerify   bool              `proxy:"skip-cert-verify,omitempty"`
+	Headers          map[string]string `proxy:"headers,omitempty"`
+	RemoteDnsResolve bool              `proxy:"remote-dns-resolve,omitempty"`
 }
 
 // StreamConn implements C.ProxyAdapter
@@ -82,11 +87,11 @@ func (h *Http) shakeHand(metadata *C.Metadata, rw io.ReadWriter) error {
 		URL: &url.URL{
 			Host: addr,
 		},
-		Host: addr,
-		Header: http.Header{
-			"Proxy-Connection": []string{"Keep-Alive"},
-		},
+		Host:   addr,
+		Header: h.headers.Clone(),
 	}
+
+	req.Header.Add("Proxy-Connection", "Keep-Alive")
 
 	if h.user != "" && h.pass != "" {
 		auth := h.user + ":" + h.pass
@@ -139,6 +144,11 @@ func NewHttp(option HttpOption) *Http {
 		}
 	}
 
+	headers := http.Header{}
+	for name, value := range option.Headers {
+		headers.Add(name, value)
+	}
+
 	return &Http{
 		Base: &Base{
 			name:  option.Name,
@@ -146,9 +156,11 @@ func NewHttp(option HttpOption) *Http {
 			tp:    C.Http,
 			iface: option.Interface,
 			rmark: option.RoutingMark,
+			dns:   option.RemoteDnsResolve,
 		},
 		user:      option.UserName,
 		pass:      option.Password,
 		tlsConfig: tlsConfig,
+		headers:   headers,
 	}
 }

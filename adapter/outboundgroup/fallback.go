@@ -11,9 +11,12 @@ import (
 	"github.com/Dreamacro/clash/constant/provider"
 )
 
+var _ C.ProxyAdapter = (*Fallback)(nil)
+
 type Fallback struct {
 	*outbound.Base
 	disableUDP bool
+	disableDNS bool
 	single     *singledo.Single[[]C.Proxy]
 	providers  []provider.ProxyProvider
 }
@@ -53,6 +56,11 @@ func (f *Fallback) SupportUDP() bool {
 	return proxy.SupportUDP()
 }
 
+// DisableDnsResolve implements C.DisableDnsResolve
+func (f *Fallback) DisableDnsResolve() bool {
+	return f.disableDNS
+}
+
 // MarshalJSON implements C.ProxyAdapter
 func (f *Fallback) MarshalJSON() ([]byte, error) {
 	var all []string
@@ -67,9 +75,14 @@ func (f *Fallback) MarshalJSON() ([]byte, error) {
 }
 
 // Unwrap implements C.ProxyAdapter
-func (f *Fallback) Unwrap(metadata *C.Metadata) C.Proxy {
+func (f *Fallback) Unwrap(_ *C.Metadata) C.Proxy {
 	proxy := f.findAliveProxy(true)
 	return proxy
+}
+
+// Cleanup implements C.ProxyAdapter
+func (f *Fallback) Cleanup() {
+	f.single.Reset()
 }
 
 func (f *Fallback) proxies(touch bool) []C.Proxy {
@@ -102,5 +115,6 @@ func NewFallback(option *GroupCommonOption, providers []provider.ProxyProvider) 
 		single:     singledo.NewSingle[[]C.Proxy](defaultGetProxiesDuration),
 		providers:  providers,
 		disableUDP: option.DisableUDP,
+		disableDNS: option.DisableDNS,
 	}
 }

@@ -23,7 +23,7 @@
 - Local HTTP/HTTPS/SOCKS server with authentication support
 - Shadowsocks(R), VMess, VLESS, Trojan, Snell, WireGuard, SOCKS5, HTTP(S) outbound support
 - Built-in [fake-ip](https://www.rfc-editor.org/rfc/rfc3089) DNS server that aims to minimize DNS pollution attack impact. DoH/DoT upstream supported.
-- Rules based off domains, GEOIP, GEOSITE, IP-CIDR or process names to route packets to different destinations
+- Rules based off dynamic scripting, domains, GEOIP, GEOSITE, IP-CIDR or process names to route packets to different destinations
 - Proxy groups allow users to implement powerful rules. Supports automatic fallback, load balancing or auto select proxy based off latency
 - Remote providers, allowing users to get proxy lists remotely instead of hardcoding in config
 - Transparent proxy: Redirect TCP and TProxy TCP/UDP with automatic route table/rule management
@@ -32,17 +32,20 @@
 - Policy routing with Scripts
 
 ## Getting Started
-Documentations are available at [GitHub Wiki](https://github.com/Dreamacro/clash/wiki).
+Documentations are available at [GitHub Wiki](https://dreamacro.github.io/clash/).
 
 ## Advanced usage for this branch
 ### General configuration
 ```yaml
-sniffing: true # Sniff TLS SNI
+# sniffing: true # Sniff TLS SNI
 
-force-cert-verify: true # force verify TLS Certificate, prevent machine-in-the-middle attacks
+force-cert-verify: true # force verify TLS Certificate for all proxies, prevent Machine-In-The-Middle attack
 
 profile:
   tracing: false # prevent logs leak, default value is true
+
+experimental:
+  udp-fallback-policy: 'a proxy that supports UDP' # or `direct` or `reject`
 ```
 
 ### MITM configuration
@@ -59,7 +62,7 @@ WARNING: DO NOT USE THIS FEATURE TO BREAK LOCAL LAWS
 # Port of MITM proxy server on the local end
 mitm-port: 7894
 
-# Man-In-The-Middle attack
+# Machine-In-The-Middle attack
 mitm:
   hosts: # use for others proxy type. E.g: TUN, socks
     - +.example.com
@@ -78,7 +81,7 @@ mitm:
 ```
 
 ### DNS configuration
-Support resolve ip with a proxy tunnel or interface.
+Support lookup ip with a proxy tunnel or interface.
 
 Support `geosite` with `fallback-filter`.
 
@@ -88,7 +91,7 @@ Use `curl -X POST controllerip:port/cache/fakeip/flush` to flush persistence fak
    enable: true
    use-hosts: true
    ipv6: false
-   # remote-dns-resolve: true # remote resolve DNS on handle UDP session, default value is true
+   remote-dns-resolve: true # remote resolve DNS on handle TCP connect and UDP session, default value is true
    enhanced-mode: fake-ip
    fake-ip-range: 198.18.0.1/16
    listen: 127.0.0.1:6868
@@ -100,11 +103,14 @@ Use `curl -X POST controllerip:port/cache/fakeip/flush` to flush persistence fak
      - tls://223.5.5.5:853
    fallback:
      - 'tls://8.8.4.4:853#proxy or interface'
-     - 'https://1.0.0.1/dns-query#Proxy'  # append the proxy adapter name to the end of DNS URL with '#' prefix.
+     - 'https://1.0.0.1/dns-query#Proxy' # use a proxy or interface
+   remote-nameserver: # remote resolve DNS
+     - 'tls://1.1.1.1:853'
+     - 'tls://8.8.8.8:853'
    fallback-filter:
      geoip: false
      geosite:
-       - gfw  # `geosite` filter only use fallback server to resolve ip, prevent DNS leaks to untrusted DNS providers.
+       - gfw  # `geosite` filter only use fallback server to lookup ip, prevent DNS leaks to untrusted DNS providers.
      domain:
        - +.example.com
      ipcidr:
@@ -121,7 +127,6 @@ Simply add the following to the main configuration:
 tun:
   enable: true
   stack: system # or gvisor
-  # device: tun://utun8 # or fd://xxx, it's optional
   # dns-hijack:
   #   - 8.8.8.8:53
   #   - tcp://8.8.8.8:53
@@ -170,43 +175,46 @@ Finally, open the Clash
 - Support rule `GEOSITE`.
 - Support rule `USER-AGENT`.
 - Support `multiport` condition for rule `SRC-PORT` and `DST-PORT`.
-- Support `network` condition for all rules.
-- Support `process` condition for all rules.
-- Support source IPCIDR condition for all rules, just append to the end.
+- Support nestable "rule groups", `if` field is the same as the shortcut syntax and if none of the sub-rules match, then continue to match the next rule.
 
-The `GEOIP` databases via [https://github.com/Loyalsoldier/geoip](https://raw.githubusercontent.com/Loyalsoldier/geoip/release/Country.mmdb).
+Script shortcuts engines: [expr](https://expr.medv.io/) & [starlark](https://github.com/google/starlark-go).
 
-The `GEOSITE` databases via [https://github.com/Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat).
 ```yaml
 mode: rule
 
 script:
+  engine: expr # or starlark (10x to 20x slower), the default engine is `expr`
   shortcuts: # `src_port` and `dst_port` are number
     quic: 'network == "udp" and dst_port == 443'
-    privacy: '"analytics" in host or "adservice" in host or "firebase" in host or "safebrowsing" in host or "doubleclick" in host'
+    # privacy: '"analytics" in host or "adservice" in host or "firebase" in host or "safebrowsing" in host or "doubleclick" in host'
+    privacy: |
+      any(["analytics", "adservice", "firebase", "safebrowsing", "doubleclick", "bugly", "bugsnag"], host contains #)
     BilibiliUdp: |
       network == "udp" and match_provider("bilibili")
     ParentalControls: |
       src_ip == "192.168.1.123" and now.hour < 8 and now.hour > 22
 rules:
+  - if: network == 'tcp'
+    name: TCP
+    # engine: expr # the default engine is `expr`, `starlark` is also valid
+    rules:
+      - if: dst_port == 443
+        name: HTTPS
+        rules:
+          - MATCH,DIRECT
+      - DOMAIN-SUFFIX,baidu.com,DIRECT
+
   # rule SCRIPT shortcuts
   - SCRIPT,quic,REJECT # Disable QUIC
   - SCRIPT,privacy,REJECT
   - SCRIPT,BilibiliUdp,REJECT
   - SCRIPT,ParentalControls,REJECT
 
-  # network condition for all rules
-  - DOMAIN-SUFFIX,example.com,DIRECT,tcp
-  - DOMAIN-SUFFIX,example.com,REJECT,udp
-
-  # process condition for all rules (add 'P:' prefix)
-  - DOMAIN-SUFFIX,example.com,REJECT,P:Google Chrome Helper
-
   # multiport condition for rules SRC-PORT and DST-PORT
   - DST-PORT,123/136/137-139,DIRECT,udp
 
   # USER-AGENT payload cannot include the comma character, '*' meaning any character.
-  - USER-AGENT,*example*,PROXY
+  # - USER-AGENT,*example*,PROXY
 
   # rule GEOSITE
   - GEOSITE,category-ads-all,REJECT
@@ -219,9 +227,6 @@ rules:
   - GEOSITE,geolocation-cn,DIRECT
   - GEOSITE,geolocation-!cn,PROXY
 
-  # source IPCIDR condition for all rules in gateway proxy
-  #- GEOSITE,geolocation-!cn,REJECT,192.168.1.88/32,192.168.1.99/32
-  
   - GEOIP,telegram,PROXY,no-resolve
   - GEOIP,lan,DIRECT,no-resolve
   - GEOIP,cn,DIRECT
@@ -246,14 +251,16 @@ process_path:    string
 user_agent:      string
 special_proxy:   string
 src_ip:          string
-src_port:        int
+src_port:        uint16
 dst_ip:          string // call resolve_ip(host) if empty
-dst_port:        int
+dst_port:        uint16
+inbound_port:    uint16
 ```
 Script shortcut functions
 ```ts
 type resolve_ip = (host: string) => string // ip string
 type in_cidr = (ip: string, cidr: string) => boolean // ip in cidr
+type in_ipset = (name: string, ip: string) => boolean // ip in ipset
 type geoip = (ip: string) => string // country code
 type match_provider = (name: string) => boolean // in rule provider
 type resolve_process_name = () => string // process name
@@ -276,7 +283,7 @@ script:
       if processName == 'apsd':
         return "DIRECT"
 
-      if metadata["network"] == 'udp' and metadata["dst_port"] == 443:
+      if metadata["network"] == 'udp' and metadata["dst_port"] == '443':
         return "REJECT"
 
       host = metadata["host"]
@@ -327,6 +334,7 @@ interface Metadata {
   src_port: string
   dst_ip: string
   dst_port: string
+  inbound_port: number
 }
 
 interface Context {
@@ -342,8 +350,6 @@ interface Context {
 
 ### Proxies configuration
 Support outbound protocol `VLESS`.
-
-Support `Trojan` with XTLS.
 
 Support userspace `WireGuard` outbound.
 
@@ -364,31 +370,7 @@ proxies:
     servername: example.com
     udp: true
     # skip-cert-verify: true
-  - name: "vless-xtls"
-    type: vless
-    server: server
-    port: 443
-    uuid: uuid
-    network: tcp
-    servername: example.com
-    flow: xtls-rprx-direct # or xtls-rprx-origin
-    # flow-show: true # print the XTLS direction log
-    # udp: true
-    # skip-cert-verify: true
 
-  # Trojan
-  - name: "trojan-xtls"
-    type: trojan
-    server: server
-    port: 443
-    password: yourpsk
-    network: tcp
-    flow: xtls-rprx-direct # or xtls-rprx-origin
-    # flow-show: true # print the XTLS direction log
-    # udp: true
-    # sni: example.com # aka server name
-    # skip-cert-verify: true
-  
   # WireGuard
   - name: "wg"
     type: wireguard
@@ -422,13 +404,14 @@ proxy-groups:
       - ss1
       - ss2
       - ss3
-        
+
   - name: "filtering-proxy-providers"
     type: url-test
     url: "http://www.gstatic.com/generate_204"
-    interval: 300
-    tolerance: 200
+    interval: 5m # support human-friendly config (30s 1h 10m30s etc.)
+    tolerance: 200ms # support human-friendly config (30s 1h 10m30s etc.)
     # lazy: true
+    # disable-dns: true # disable remote resolve DNS for this group
     filter: "XXX" # a regular expression
     use:
       - provider1
@@ -436,22 +419,26 @@ proxy-groups:
 proxy-providers:
   provider1:
     type: http
-    url: "url" # support V2Ray subscription URL
-    # url-proxy: true # forward to tun if tun enabled
-    interval: 3600
+    url: "url"
+    interval: 24h # support human-friendly config (30s 1h 10m30s etc.)
     path: ./providers/provider1.yaml
-    # filter: "xxx"
-    # prefix-name: "XXX-"
-    header:  # custom http request header
-      User-Agent:
-        - "Clash/v1.10.6"
-    #   Accept:
-    #     - 'application/vnd.github.v3.raw'
-    #   Authorization:
-    #     - ' token xxxxxxxxxxx'
+    # prefix-name: "XXX-" # append a prefix name to each proxy name to avoid duplicate names with other proxies
+    # url-proxy: true # proxy the URL by inbounds or TUN
+    # rand-host: true # use a random host for http/ws network, it will overwrite the `host` field in http-opts and ws-opts
+    # disable-dns: true # disable remote resolve DNS
+    # udp: true # force enable UDP traffic, it will overwrite the `udp` field, conflict with `disable-udp` field
+    # disable-udp: true # disable UDP traffic, it will overwrite the `udp` field
+    force-cert-verify: true # force verify TLS Certificate, default value is true, if the value is true then overwrite the `skip-cert-verify` value to false
+    # header:  # custom http request header
+      # User-Agent:
+      #   - "Clash/v1.18.0"
+      # Accept:
+      #   - 'application/vnd.github.v3.raw'
+      # Authorization:
+      #   - ' token xxxxxxxxxxx'
     health-check:
       enable: false
-      interval: 1200
+      interval: 0
       # lazy: false # default value is true
       url: http://www.gstatic.com/generate_204
 ```
@@ -511,18 +498,14 @@ tun:
 ```
 
 ### Template
-[Normal](https://github.com/yaling888/clash/blob/plus-pro/examples/template/local-client.yaml), usually used as a local client.
-
-[Auto redirect](https://github.com/yaling888/clash/blob/plus-pro/examples/template/auto-redir-transparent-gateway.yaml), usually used as a transparent proxy gateway.
-
-[Redirect to tun](https://github.com/yaling888/clash/blob/plus-pro/examples/template/redirect-to-tun-transparent-gateway.yaml), usually used as a transparent proxy gateway.
+* [General](https://github.com/yaling888/clash/blob/plus-pro/examples/template/local-client.yaml), usually used as a local client.
+* [Auto redirect](https://github.com/yaling888/clash/blob/plus-pro/examples/template/auto-redir-transparent-gateway.yaml), usually used as a transparent proxy gateway.
+* [Redirect to tun](https://github.com/yaling888/clash/blob/plus-pro/examples/template/redirect-to-tun-transparent-gateway.yaml), usually used as a transparent proxy gateway.
 
 ### Daemon
-For [macOS](https://github.com/yaling888/clash/blob/plus-pro/examples/daemon/macos/org.eu.clashplus.plist).
-
-For [Linux](https://github.com/yaling888/clash/blob/plus-pro/examples/daemon/linux/clash.service).
-
-For [Windows](https://github.com/yaling888/SoulX).
+* For [macOS](https://github.com/yaling888/clash/blob/plus-pro/examples/daemon/macos/org.eu.clashplus.plist).
+* For [Linux](https://github.com/yaling888/clash/blob/plus-pro/examples/daemon/linux/clash.service).
+* For [Windows](https://github.com/yaling888/SoulX).
 
 ### Web GUI
 Open the Dashboard online by click [http://yacd.clash-plus.cf](http://yacd.clash-plus.cf) for local API by Safari or [https://yacd.clash-plus.cf](https://yacd.clash-plus.cf) for local API by Chrome.
@@ -542,9 +525,6 @@ external-ui: dashboard
 ```
 Open [http://127.0.0.1:9090/ui/](http://127.0.0.1:9090/ui/) by web browser.
 
-## Development
-If you want to build an application that uses clash as a library, check out the the [GitHub Wiki](https://github.com/Dreamacro/clash/wiki/use-clash-as-a-library)
-
 ## Credits
 
 * [riobard/go-shadowsocks2](https://github.com/riobard/go-shadowsocks2)
@@ -554,5 +534,3 @@ If you want to build an application that uses clash as a library, check out the 
 ## License
 
 This software is released under the GPL-3.0 license.
-
-[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2FDreamacro%2Fclash.svg?type=large)](https://app.fossa.io/projects/git%2Bgithub.com%2FDreamacro%2Fclash?ref=badge_large)

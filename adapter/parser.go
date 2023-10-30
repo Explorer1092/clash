@@ -2,13 +2,25 @@ package adapter
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/Dreamacro/clash/adapter/outbound"
 	"github.com/Dreamacro/clash/common/structure"
+	"github.com/Dreamacro/clash/common/util"
 	C "github.com/Dreamacro/clash/constant"
 )
 
-func ParseProxy(mapping map[string]any, forceCertVerify, udp, autoCipher, randomHost bool) (C.Proxy, error) {
+type ProxyOption struct {
+	ForceCertVerify bool
+	ForceUDP        bool
+	DisableUDP      bool
+	DisableDNS      bool
+	AutoCipher      bool
+	RandomHost      bool
+	PrefixName      string
+}
+
+func ParseProxy(mapping map[string]any, option ProxyOption) (C.Proxy, error) {
 	decoder := structure.NewDecoder(structure.Option{TagName: "proxy", WeaklyTypedInput: true})
 	proxyType, existType := mapping["type"].(string)
 	if !existType {
@@ -21,52 +33,70 @@ func ParseProxy(mapping map[string]any, forceCertVerify, udp, autoCipher, random
 	)
 	switch proxyType {
 	case "ss":
-		ssOption := &outbound.ShadowSocksOption{}
+		ssOption := &outbound.ShadowSocksOption{RemoteDnsResolve: true}
 		err = decoder.Decode(mapping, ssOption)
 		if err != nil {
 			break
 		}
-		if udp {
+		if option.ForceUDP {
 			ssOption.UDP = true
 		}
-		if randomHost {
+		if option.DisableUDP {
+			ssOption.UDP = false
+		}
+		if option.RandomHost {
 			ssOption.RandomHost = true
+		}
+		if option.DisableDNS {
+			ssOption.RemoteDnsResolve = false
 		}
 		proxy, err = outbound.NewShadowSocks(*ssOption)
 	case "ssr":
-		ssrOption := &outbound.ShadowSocksROption{}
+		ssrOption := &outbound.ShadowSocksROption{RemoteDnsResolve: true}
 		err = decoder.Decode(mapping, ssrOption)
 		if err != nil {
 			break
 		}
-		if udp {
+		if option.ForceUDP {
 			ssrOption.UDP = true
 		}
-		if randomHost {
+		if option.DisableUDP {
+			ssrOption.UDP = false
+		}
+		if option.RandomHost {
 			ssrOption.RandomHost = true
+		}
+		if option.DisableDNS {
+			ssrOption.RemoteDnsResolve = false
 		}
 		proxy, err = outbound.NewShadowSocksR(*ssrOption)
 	case "socks5":
-		socksOption := &outbound.Socks5Option{}
+		socksOption := &outbound.Socks5Option{RemoteDnsResolve: true}
 		err = decoder.Decode(mapping, socksOption)
 		if err != nil {
 			break
 		}
-		if forceCertVerify {
+		if option.ForceCertVerify {
 			socksOption.SkipCertVerify = false
 		}
-		if udp {
+		if option.ForceUDP {
 			socksOption.UDP = true
+		}
+		if option.DisableDNS {
+			socksOption.RemoteDnsResolve = false
 		}
 		proxy = outbound.NewSocks5(*socksOption)
 	case "http":
-		httpOption := &outbound.HttpOption{}
+		httpOption := &outbound.HttpOption{RemoteDnsResolve: true}
 		err = decoder.Decode(mapping, httpOption)
 		if err != nil {
 			break
 		}
-		if forceCertVerify {
+		if option.ForceCertVerify {
 			httpOption.SkipCertVerify = false
+		}
+		if option.DisableDNS {
+			httpOption.RemoteDnsResolve = false
 		}
 		proxy = outbound.NewHttp(*httpOption)
 	case "vmess":
@@ -76,61 +106,98 @@ func ParseProxy(mapping map[string]any, forceCertVerify, udp, autoCipher, random
 				Path:    []string{"/"},
 				Headers: make(map[string][]string),
 			},
+			RemoteDnsResolve: true,
 		}
 		err = decoder.Decode(mapping, vmessOption)
 		if err != nil {
 			break
 		}
-		if forceCertVerify {
+		vmessOption.HTTPOpts.Method = util.EmptyOr(strings.ToUpper(vmessOption.HTTPOpts.Method), "GET")
+		if option.ForceCertVerify {
 			vmessOption.SkipCertVerify = false
 		}
-		if udp {
+		if option.ForceUDP {
 			vmessOption.UDP = true
 		}
-		if autoCipher {
+		if option.DisableUDP {
+			vmessOption.UDP = false
+		}
+		if option.AutoCipher {
 			vmessOption.Cipher = "auto"
 		}
-		if randomHost {
+		if option.RandomHost {
 			vmessOption.RandomHost = true
+		}
+		if option.DisableDNS {
+			vmessOption.RemoteDnsResolve = false
 		}
 		proxy, err = outbound.NewVmess(*vmessOption)
 	case "vless":
-		vlessOption := &outbound.VlessOption{}
+		vlessOption := &outbound.VlessOption{
+			HTTPOpts: outbound.HTTPOptions{
+				Method:  "GET",
+				Path:    []string{"/"},
+				Headers: make(map[string][]string),
+			},
+			RemoteDnsResolve: true,
+		}
 		err = decoder.Decode(mapping, vlessOption)
 		if err != nil {
 			break
 		}
-		if forceCertVerify {
+		vlessOption.HTTPOpts.Method = util.EmptyOr(strings.ToUpper(vlessOption.HTTPOpts.Method), "GET")
+		if option.ForceCertVerify {
 			vlessOption.SkipCertVerify = false
 		}
-		if udp {
+		if option.ForceUDP {
 			vlessOption.UDP = true
+		}
+		if option.DisableUDP {
+			vlessOption.UDP = false
+		}
+		if option.DisableDNS {
+			vlessOption.RemoteDnsResolve = false
+		}
+		if option.RandomHost {
+			vlessOption.RandomHost = true
 		}
 		proxy, err = outbound.NewVless(*vlessOption)
 	case "snell":
-		snellOption := &outbound.SnellOption{}
+		snellOption := &outbound.SnellOption{RemoteDnsResolve: true}
 		err = decoder.Decode(mapping, snellOption)
 		if err != nil {
 			break
 		}
-		if udp {
+		if option.ForceUDP {
 			snellOption.UDP = true
 		}
-		if randomHost {
+		if option.DisableUDP {
+			snellOption.UDP = false
+		}
+		if option.RandomHost {
 			snellOption.RandomHost = true
+		}
+		if option.DisableDNS {
+			snellOption.RemoteDnsResolve = false
 		}
 		proxy, err = outbound.NewSnell(*snellOption)
 	case "trojan":
-		trojanOption := &outbound.TrojanOption{}
+		trojanOption := &outbound.TrojanOption{RemoteDnsResolve: true}
 		err = decoder.Decode(mapping, trojanOption)
 		if err != nil {
 			break
 		}
-		if forceCertVerify {
+		if option.ForceCertVerify {
 			trojanOption.SkipCertVerify = false
 		}
-		if udp {
+		if option.ForceUDP {
 			trojanOption.UDP = true
+		}
+		if option.DisableUDP {
+			trojanOption.UDP = false
+		}
+		if option.DisableDNS {
+			trojanOption.RemoteDnsResolve = false
 		}
 		proxy, err = outbound.NewTrojan(*trojanOption)
 	case "wireguard":
@@ -141,7 +208,7 @@ func ParseProxy(mapping map[string]any, forceCertVerify, udp, autoCipher, random
 		if err != nil {
 			break
 		}
-		if udp {
+		if option.ForceUDP {
 			wireguardOption.UDP = true
 		}
 		proxy, err = outbound.NewWireGuard(*wireguardOption)

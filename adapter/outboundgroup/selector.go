@@ -12,9 +12,12 @@ import (
 	"github.com/Dreamacro/clash/constant/provider"
 )
 
+var _ C.ProxyAdapter = (*Selector)(nil)
+
 type Selector struct {
 	*outbound.Base
 	disableUDP bool
+	disableDNS bool
 	single     *singledo.Single[C.Proxy]
 	selected   string
 	providers  []provider.ProxyProvider
@@ -45,6 +48,11 @@ func (s *Selector) SupportUDP() bool {
 	}
 
 	return s.selectedProxy(false).SupportUDP()
+}
+
+// DisableDnsResolve implements C.DisableDnsResolve
+func (s *Selector) DisableDnsResolve() bool {
+	return s.disableDNS
 }
 
 // MarshalJSON implements C.ProxyAdapter
@@ -78,8 +86,13 @@ func (s *Selector) Set(name string) error {
 }
 
 // Unwrap implements C.ProxyAdapter
-func (s *Selector) Unwrap(metadata *C.Metadata) C.Proxy {
+func (s *Selector) Unwrap(_ *C.Metadata) C.Proxy {
 	return s.selectedProxy(true)
+}
+
+// Cleanup implements C.ProxyAdapter
+func (s *Selector) Cleanup() {
+	s.single.Reset()
 }
 
 func (s *Selector) selectedProxy(touch bool) C.Proxy {
@@ -90,6 +103,7 @@ func (s *Selector) selectedProxy(touch bool) C.Proxy {
 				return proxy, nil
 			}
 		}
+		s.selected = proxies[0].Name()
 
 		return proxies[0], nil
 	})
@@ -98,11 +112,6 @@ func (s *Selector) selectedProxy(touch bool) C.Proxy {
 }
 
 func NewSelector(option *GroupCommonOption, providers []provider.ProxyProvider) *Selector {
-	selected := "REJECT"
-	if len(providers) != 0 && len(providers[0].Proxies()) != 0 {
-		selected = providers[0].Proxies()[0].Name()
-	}
-
 	return &Selector{
 		Base: outbound.NewBase(outbound.BaseOption{
 			Name:        option.Name,
@@ -112,7 +121,8 @@ func NewSelector(option *GroupCommonOption, providers []provider.ProxyProvider) 
 		}),
 		single:     singledo.NewSingle[C.Proxy](defaultGetProxiesDuration),
 		providers:  providers,
-		selected:   selected,
+		selected:   "",
 		disableUDP: option.DisableUDP,
+		disableDNS: option.DisableDNS,
 	}
 }

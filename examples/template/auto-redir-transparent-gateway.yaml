@@ -32,6 +32,9 @@ profile:
   store-fake-ip: true
   tracing: false # default value is true
 
+experimental:
+#  udp-fallback-policy: 'proxy' # a proxy that supports UDP
+
 # A RESTful API for clash
 external-controller: 0.0.0.0:9090
 
@@ -65,11 +68,12 @@ dns:
   enable: true
   use-hosts: true
   ipv6: false
+  remote-dns-resolve: true # default value is true
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
   listen: 0.0.0.0:53
 #  nameserver-policy:
-#    +.example.com: 192.168.1.254
+#    '+.example.com': 192.168.1.254
   default-nameserver:
     - 119.29.29.29
     - 223.6.6.6
@@ -79,23 +83,26 @@ dns:
   nameserver:
     - https://120.53.53.53/dns-query
     - tls://223.6.6.6:853
+  remote-nameserver:
+    - tls://8.8.8.8:853
+    - tls://1.1.1.1:853
   fallback:
-    - tcp://8.8.8.8:53#DNS-Proxy
+#    - tcp://8.8.8.8:53#DNS-Proxy # if set `remote-dns-resolve` to false, then enable it.
   fake-ip-filter:
     - '*.lan'
-#    - +.example.com
+#    - '+.example.com'
   fallback-filter:
     geoip: false
     geosite:
       - gfw
 #    domain:
-#      - +.example.com
+#      - '+.example.com'
     ipcidr:
       - 0.0.0.0/32
 
 #mitm:
 #  hosts:
-#    - +.google.cn
+#    - '+.google.cn'
 #  rules:
 #    - ^https?://(.*)google\.cn(.*) url 307 https://$1google.com$2
 
@@ -166,6 +173,7 @@ proxy-groups:
 
   - name: Geo-CN
     type: select
+    disable-dns: true
     filter: "China|CN|中国"
     use: *Use
     proxies:
@@ -296,6 +304,7 @@ proxy-groups:
 
   - name: CN
     type: select
+    disable-dns: true
     use: *Use
     proxies: *Proxy
 
@@ -330,7 +339,7 @@ script:
 
     def main(ctx, metadata):
       network = metadata["network"]
-      dst_port = metadata["dst_port"]
+      dst_port = int(metadata["dst_port"])
       if network == 'udp' and dst_port == 443:
         return "REJECT"
 
@@ -399,12 +408,12 @@ script:
 
       return "Mismatch" # default policy for requests which are not matched by any other script
 
+  engine: expr # or starlark (10x to 20x slower)
   shortcuts:
     QUIC: |
       network == "udp" and dst_port == 443
     Privacy: |
-      "analytics" in host or "adservice" in host or "firebase" in host or "safebrowsing" in host or
-      "doubleclick" in host or "bugly" in host
+      any(["analytics", "adservice", "firebase", "safebrowsing", "doubleclick", "bugly", "bugsnag"], host contains #)
     BilibiliUdp: |
       network == "udp" and match_provider("bilibili")
     DirectUdp: |

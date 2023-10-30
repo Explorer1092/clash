@@ -1,18 +1,25 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/Dreamacro/clash/common/convert"
 	"github.com/Dreamacro/clash/component/dialer"
+	"github.com/Dreamacro/clash/component/profile/cachefile"
+	"github.com/Dreamacro/clash/constant"
 	types "github.com/Dreamacro/clash/constant/provider"
+	"github.com/Dreamacro/clash/listener/auth"
 )
+
+var _ types.Vehicle = (*FileVehicle)(nil)
 
 type FileVehicle struct {
 	path string
@@ -26,6 +33,10 @@ func (f *FileVehicle) Path() string {
 	return f.path
 }
 
+func (*FileVehicle) Proxy() bool {
+	return false
+}
+
 func (f *FileVehicle) Read() ([]byte, error) {
 	return os.ReadFile(f.path)
 }
@@ -34,11 +45,14 @@ func NewFileVehicle(path string) *FileVehicle {
 	return &FileVehicle{path: path}
 }
 
+var _ types.Vehicle = (*HTTPVehicle)(nil)
+
 type HTTPVehicle struct {
-	path     string
-	url      string
-	urlProxy bool
-	header   http.Header
+	path         string
+	url          string
+	urlProxy     bool
+	header       http.Header
+	subscription *Subscription
 }
 
 func (h *HTTPVehicle) Type() types.VehicleType {
@@ -49,6 +63,10 @@ func (h *HTTPVehicle) Path() string {
 	return h.path
 }
 
+func (h *HTTPVehicle) Proxy() bool {
+	return h.urlProxy
+}
+
 func (h *HTTPVehicle) Read() ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
 	defer cancel()
@@ -57,6 +75,18 @@ func (h *HTTPVehicle) Read() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	q := uri.Query()
+	q.Del("list")
+	q.Del("sub")
+	q.Del("mu")
+	if !q.Has("clash") {
+		q.Set("clash", "1")
+	}
+	if !q.Has("flag") {
+		q.Set("flag", "clash")
+	}
+	uri.RawQuery = q.Encode()
 
 	req, err := http.NewRequest(http.MethodGet, uri.String(), nil)
 	if err != nil {
@@ -84,11 +114,18 @@ func (h *HTTPVehicle) Read() ([]byte, error) {
 		ExpectContinueTimeout: 1 * time.Second,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			if h.urlProxy {
-				// make sure the tun device is turned on, and do not reject the Clash traffic by rule `PROCESS-NAME`
-				return (&net.Dialer{}).DialContext(ctx, network, address) // forward to tun if tun enabled
+				// forward to tun if tun enabled
+				// do not reject the Clash’s own traffic by rule `PROCESS-NAME`
+				return (&net.Dialer{}).DialContext(ctx, network, address)
 			}
 			return dialer.DialContext(ctx, network, address, dialer.WithDirect()) // with direct
 		},
+	}
+
+	// fallback to proxy url if tun disabled, make sure enable at least one inbound port
+	// do not reject the Clash’s own traffic by rule `PROCESS-NAME`
+	if h.urlProxy && !constant.GetTunConf().Enable {
+		transport.Proxy = constant.ProxyURL(auth.Authenticator())
 	}
 
 	client := http.Client{Transport: transport}
@@ -105,14 +142,50 @@ func (h *HTTPVehicle) Read() ([]byte, error) {
 		return nil, err
 	}
 
+	userinfo := resp.Header.Get("Subscription-Userinfo")
+	if userinfo != "" {
+		if h.subscription == nil {
+			h.subscription = &Subscription{}
+		}
+		h.subscription.parse(userinfo)
+		if h.subscription.Total != 0 {
+			cachefile.Cache().SetSubscription(h.url, userinfo)
+		}
+	}
+
 	return removeComment(buf), nil
 }
 
+func (h *HTTPVehicle) Subscription() *Subscription {
+	return h.subscription
+}
+
 func NewHTTPVehicle(path string, url string, urlProxy bool, header http.Header) *HTTPVehicle {
-	return &HTTPVehicle{
-		path:     path,
-		url:      url,
-		urlProxy: urlProxy,
-		header:   header,
+	var (
+		userinfo     = cachefile.Cache().GetSubscription(url)
+		subscription *Subscription
+	)
+	if userinfo != "" {
+		subscription = &Subscription{}
+		subscription.parse(userinfo)
 	}
+	return &HTTPVehicle{
+		path:         path,
+		url:          url,
+		urlProxy:     urlProxy,
+		header:       header,
+		subscription: subscription,
+	}
+}
+
+func removeComment(buf []byte) []byte {
+	arr := regexp.MustCompile(`(.*#.*\n)`).FindAllSubmatch(buf, -1)
+	for _, subs := range arr {
+		sub := subs[0]
+		if !bytes.HasPrefix(bytes.TrimLeft(sub, " 	"), []byte("#")) {
+			continue
+		}
+		buf = bytes.Replace(buf, sub, []byte(""), 1)
+	}
+	return buf
 }

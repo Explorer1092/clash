@@ -35,7 +35,7 @@ const (
 )
 
 const (
-	DefaultTCPTimeout = 5 * time.Second
+	DefaultTCPTimeout = 8 * time.Second
 	DefaultUDPTimeout = DefaultTCPTimeout
 	DefaultTLSTimeout = DefaultTCPTimeout
 )
@@ -77,8 +77,6 @@ type Conn interface {
 type PacketConn interface {
 	net.PacketConn
 	Connection
-	// Deprecate WriteWithMetadata because of remote resolve DNS cause TURN failed
-	// WriteWithMetadata(p []byte, metadata *Metadata) (n int, err error)
 }
 
 type ProxyAdapter interface {
@@ -86,6 +84,7 @@ type ProxyAdapter interface {
 	Type() AdapterType
 	Addr() string
 	SupportUDP() bool
+	DisableDnsResolve() bool
 	MarshalJSON() ([]byte, error)
 
 	// StreamConn wraps a protocol around net.Conn with Metadata.
@@ -124,15 +123,10 @@ type DelayHistory struct {
 type Proxy interface {
 	ProxyAdapter
 	Alive() bool
+	HasV6() bool
 	DelayHistory() []DelayHistory
 	LastDelay() uint16
 	URLTest(ctx context.Context, url string) (uint16, uint16, error)
-
-	// Deprecated: use DialContext instead.
-	Dial(metadata *Metadata) (Conn, error)
-
-	// Deprecated: use DialPacketConn instead.
-	DialUDP(metadata *Metadata) (PacketConn, error)
 }
 
 // AdapterType is enum of adapter type
@@ -198,4 +192,37 @@ type UDPPacket interface {
 
 	// LocalAddr returns the source IP/Port of packet
 	LocalAddr() net.Addr
+}
+
+type RawProxy struct {
+	Name     string         `yaml:"name"`
+	Type     string         `yaml:"type"`
+	Server   string         `yaml:"server"`
+	UUID     string         `yaml:"uuid,omitempty"`
+	Password string         `yaml:"password,omitempty"`
+	M        map[string]any `yaml:",inline"`
+}
+
+func (m *RawProxy) Init() {
+	if m == nil {
+		return
+	}
+	if m.M == nil {
+		m.M = make(map[string]any)
+	}
+	if m.Name != "" {
+		m.M["name"] = m.Name
+	}
+	if m.Type != "" {
+		m.M["type"] = m.Type
+	}
+	if m.Server != "" {
+		m.M["server"] = m.Server
+	}
+	if m.UUID != "" {
+		m.M["uuid"] = m.UUID
+	}
+	if m.Password != "" {
+		m.M["password"] = m.Password
+	}
 }

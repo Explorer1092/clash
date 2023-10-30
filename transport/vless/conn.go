@@ -1,23 +1,19 @@
 package vless
 
 import (
-	"bytes"
-	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 
 	"github.com/gofrs/uuid/v5"
-	xtls "github.com/xtls/go"
-	"google.golang.org/protobuf/proto"
+
+	"github.com/Dreamacro/clash/common/pool"
 )
 
 type Conn struct {
 	net.Conn
 	dst      *DstAddr
 	id       *uuid.UUID
-	addons   *Addons
 	received bool
 }
 
@@ -34,44 +30,32 @@ func (vc *Conn) Read(b []byte) (int, error) {
 }
 
 func (vc *Conn) sendRequest() error {
-	buf := &bytes.Buffer{}
+	buf := pool.BufferWriter{}
 
-	buf.WriteByte(Version)   // protocol version
-	buf.Write(vc.id.Bytes()) // 16 bytes of uuid
+	buf.PutUint8(Version)       // protocol version
+	buf.PutSlice(vc.id.Bytes()) // 16 bytes of uuid
+	buf.PutUint8(0)             // addon data length. 0 means no addon data
+	// buf.PutString("")           // addon data
 
-	if vc.addons != nil {
-		bytes, err := proto.Marshal(vc.addons)
-		if err != nil {
-			return err
-		}
-
-		buf.WriteByte(byte(len(bytes)))
-		buf.Write(bytes)
-	} else {
-		buf.WriteByte(0) // addon data length. 0 means no addon data
-	}
-
-	// command
+	// Command
 	if vc.dst.UDP {
-		buf.WriteByte(CommandUDP)
+		buf.PutUint8(CommandUDP)
 	} else {
-		buf.WriteByte(CommandTCP)
+		buf.PutUint8(CommandTCP)
 	}
 
 	// Port AddrType Addr
-	binary.Write(buf, binary.BigEndian, uint16(vc.dst.Port))
-	buf.WriteByte(vc.dst.AddrType)
-	buf.Write(vc.dst.Addr)
+	buf.PutUint16be(uint16(vc.dst.Port))
+	buf.PutUint8(vc.dst.AddrType)
+	buf.PutSlice(vc.dst.Addr)
 
 	_, err := vc.Conn.Write(buf.Bytes())
 	return err
 }
 
 func (vc *Conn) recvResponse() error {
-	var err error
-	buf := make([]byte, 1)
-	_, err = io.ReadFull(vc.Conn, buf)
-	if err != nil {
+	var buf [2]byte
+	if _, err := io.ReadFull(vc.Conn, buf[:]); err != nil {
 		return err
 	}
 
@@ -79,14 +63,9 @@ func (vc *Conn) recvResponse() error {
 		return errors.New("unexpected response version")
 	}
 
-	_, err = io.ReadFull(vc.Conn, buf)
-	if err != nil {
-		return err
-	}
-
-	length := int64(buf[0])
-	if length != 0 { // addon data length > 0
-		io.CopyN(io.Discard, vc.Conn, length) // just discard
+	length := int64(buf[1])
+	if length > 0 { // addon data length > 0
+		_, _ = io.CopyN(io.Discard, vc.Conn, length) // just discard
 	}
 
 	return nil
@@ -98,27 +77,6 @@ func newConn(conn net.Conn, client *Client, dst *DstAddr) (*Conn, error) {
 		Conn: conn,
 		id:   client.uuid,
 		dst:  dst,
-	}
-
-	if !dst.UDP && client.Addons != nil {
-		switch client.Addons.Flow {
-		case XRO, XRD, XRS:
-			if xtlsConn, ok := conn.(*xtls.Conn); ok {
-				xtlsConn.RPRX = true
-				xtlsConn.SHOW = client.XTLSShow
-				xtlsConn.MARK = "XTLS"
-				if client.Addons.Flow == XRS {
-					client.Addons.Flow = XRD
-				}
-
-				if client.Addons.Flow == XRD {
-					xtlsConn.DirectMode = true
-				}
-				c.addons = client.Addons
-			} else {
-				return nil, fmt.Errorf("failed to use %s, maybe \"security\" is not \"xtls\"", client.Addons.Flow)
-			}
-		}
 	}
 
 	if err := c.sendRequest(); err != nil {

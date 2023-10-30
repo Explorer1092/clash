@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 
 	"github.com/Dreamacro/clash/component/dialer"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/transport/socks5"
 )
+
+var _ C.ProxyAdapter = (*Socks5)(nil)
 
 type Socks5 struct {
 	*Base
@@ -25,14 +28,15 @@ type Socks5 struct {
 
 type Socks5Option struct {
 	BasicOption
-	Name           string `proxy:"name"`
-	Server         string `proxy:"server"`
-	Port           int    `proxy:"port"`
-	UserName       string `proxy:"username,omitempty"`
-	Password       string `proxy:"password,omitempty"`
-	TLS            bool   `proxy:"tls,omitempty"`
-	UDP            bool   `proxy:"udp,omitempty"`
-	SkipCertVerify bool   `proxy:"skip-cert-verify,omitempty"`
+	Name             string `proxy:"name"`
+	Server           string `proxy:"server"`
+	Port             int    `proxy:"port"`
+	UserName         string `proxy:"username,omitempty"`
+	Password         string `proxy:"password,omitempty"`
+	TLS              bool   `proxy:"tls,omitempty"`
+	UDP              bool   `proxy:"udp,omitempty"`
+	SkipCertVerify   bool   `proxy:"skip-cert-verify,omitempty"`
+	RemoteDnsResolve bool   `proxy:"remote-dns-resolve,omitempty"`
 }
 
 // StreamConn implements C.ProxyAdapter
@@ -104,7 +108,8 @@ func (ss *Socks5) streamConn(c net.Conn, metadata *C.Metadata) (_ net.Conn, bind
 	}
 
 	if metadata.NetWork == C.UDP {
-		bindAddr, err = socks5.ClientHandshake(c, serializesSocksAddr(metadata), socks5.CmdUDPAssociate, user)
+		udpAssocateAddr := socks5.AddrFromStdAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0))
+		bindAddr, err = socks5.ClientHandshake(c, udpAssocateAddr, socks5.CmdUDPAssociate, user)
 	} else {
 		bindAddr, err = socks5.ClientHandshake(c, serializesSocksAddr(metadata), socks5.CmdConnect, user)
 	}
@@ -175,6 +180,7 @@ func NewSocks5(option Socks5Option) *Socks5 {
 			udp:   option.UDP,
 			iface: option.Interface,
 			rmark: option.RoutingMark,
+			dns:   option.RemoteDnsResolve,
 		},
 		user:           option.UserName,
 		pass:           option.Password,

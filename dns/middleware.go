@@ -9,7 +9,6 @@ import (
 	"github.com/phuslu/log"
 
 	"github.com/Dreamacro/clash/common/cache"
-	"github.com/Dreamacro/clash/common/nnip"
 	"github.com/Dreamacro/clash/component/fakeip"
 	"github.com/Dreamacro/clash/component/trie"
 	C "github.com/Dreamacro/clash/constant"
@@ -42,13 +41,13 @@ func withHosts(hosts *trie.DomainTrie[netip.Addr], mapping *cache.LruCache[netip
 
 			if ip.Is4() && q.Qtype == D.TypeA {
 				rr := &D.A{}
-				rr.Hdr = D.RR_Header{Name: q.Name, Rrtype: D.TypeA, Class: D.ClassINET, Ttl: 10}
+				rr.Hdr = D.RR_Header{Name: q.Name, Rrtype: D.TypeA, Class: D.ClassINET, Ttl: 3}
 				rr.A = ip.AsSlice()
 
 				msg.Answer = []D.RR{rr}
 			} else if ip.Is6() && q.Qtype == D.TypeAAAA {
 				rr := &D.AAAA{}
-				rr.Hdr = D.RR_Header{Name: q.Name, Rrtype: D.TypeAAAA, Class: D.ClassINET, Ttl: 10}
+				rr.Hdr = D.RR_Header{Name: q.Name, Rrtype: D.TypeAAAA, Class: D.ClassINET, Ttl: 3}
 				rr.AAAA = ip.AsSlice()
 
 				msg.Answer = []D.RR{rr}
@@ -57,7 +56,7 @@ func withHosts(hosts *trie.DomainTrie[netip.Addr], mapping *cache.LruCache[netip
 			}
 
 			if mapping != nil {
-				mapping.SetWithExpire(ip, host, time.Now().Add(time.Second*10))
+				mapping.SetWithExpire(ip, host, time.Now().Add(time.Second*3))
 			}
 
 			ctx.SetType(context.DNSTypeHost)
@@ -92,13 +91,13 @@ func withMapping(mapping *cache.LruCache[netip.Addr, string]) middleware {
 
 				switch a := ans.(type) {
 				case *D.A:
-					ip = nnip.IpToAddr(a.A)
+					ip, _ = netip.AddrFromSlice(a.A.To4())
 					ttl = a.Hdr.Ttl
 					if !ip.IsGlobalUnicast() {
 						continue
 					}
 				case *D.AAAA:
-					ip = nnip.IpToAddr(a.AAAA)
+					ip, _ = netip.AddrFromSlice(a.AAAA)
 					ttl = a.Hdr.Ttl
 					if !ip.IsGlobalUnicast() {
 						continue
@@ -107,6 +106,7 @@ func withMapping(mapping *cache.LruCache[netip.Addr, string]) middleware {
 					continue
 				}
 
+				ttl = max(ttl, 1)
 				mapping.SetWithExpire(ip, host, time.Now().Add(time.Second*time.Duration(ttl)))
 			}
 
@@ -142,7 +142,7 @@ func withFakeIP(fakePool *fakeip.Pool) middleware {
 			msg.Answer = []D.RR{rr}
 
 			ctx.SetType(context.DNSTypeFakeIP)
-			setMsgTTL(msg, 1)
+			setMsgTTL(msg, 3)
 			msg.SetRcode(r, D.RcodeSuccess)
 			msg.Authoritative = true
 			msg.RecursionAvailable = true
@@ -162,10 +162,14 @@ func withResolver(resolver *Resolver) handler {
 			return handleMsgWithEmptyAnswer(r), nil
 		}
 
-		msg, err := resolver.Exchange(r)
+		msg, _, err := resolver.Exchange(r)
 		if err != nil {
-			log.Debug().Err(err).Str("question", q.String()).Msg("[DNS] exchange failed")
-			return msg, err
+			log.Debug().Err(err).
+				Str("name", q.Name).
+				Str("qClass", D.Class(q.Qclass).String()).
+				Str("qType", D.Type(q.Qtype).String()).
+				Msg("[DNS] exchange failed")
+			return nil, err
 		}
 		msg.SetRcode(r, msg.Rcode)
 		msg.Authoritative = true
@@ -178,14 +182,14 @@ func compose(middlewares []middleware, endpoint handler) handler {
 	length := len(middlewares)
 	h := endpoint
 	for i := length - 1; i >= 0; i-- {
-		middleware := middlewares[i]
-		h = middleware(h)
+		mMiddleware := middlewares[i]
+		h = mMiddleware(h)
 	}
 
 	return h
 }
 
-func NewHandler(resolver *Resolver, mapper *ResolverEnhancer) handler {
+func newHandler(resolver *Resolver, mapper *ResolverEnhancer) handler {
 	middlewares := []middleware{}
 
 	if resolver.hosts != nil {

@@ -13,16 +13,13 @@ import (
 )
 
 func TestWireGuard(t *testing.T) {
-	configPath := C.Path.Resolve("wireguard.conf")
-
 	cfg := &container.Config{
-		Image:        ImageBoringTun,
+		Image:        ImageWireguardGo,
 		ExposedPorts: defaultExposedPorts,
-		Cmd:          []string{"wg0"},
 	}
 	hostCfg := &container.HostConfig{
 		PortBindings: defaultPortBindings,
-		Binds:        []string{fmt.Sprintf("%s:/etc/wireguard/wg0.conf", configPath)},
+		Binds:        []string{fmt.Sprintf("%s:/etc/wireguard/wg0.conf", C.Path.Resolve("wireguard.conf"))},
 		CapAdd:       []string{"MKNOD", "NET_ADMIN", "NET_RAW"},
 	}
 
@@ -35,15 +32,16 @@ func TestWireGuard(t *testing.T) {
 
 	proxy, err := outbound.NewWireGuard(outbound.WireGuardOption{
 		Name:       "wireguard",
-		Server:     localIP.String(),
+		Server:     "127.0.0.1",
 		Port:       10002,
 		IP:         "10.0.0.2",
 		PrivateKey: "YKROUG06L42T55xJdOXIVigxy1NsRx5SBz9i9qHQ2n8=",
 		PublicKey:  "faV63mM7pkfFWFWO+nBpoxNy7JMvhawhMaEpadNr2lI=",
-		UDP:        true,
+		UDP:        false,
 	})
 	require.NoError(t, err)
 
-	time.Sleep(5 * time.Second)
+	time.Sleep(waitTime)
+
 	testSuit(t, proxy)
 }

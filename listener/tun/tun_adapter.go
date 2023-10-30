@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -11,7 +12,8 @@ import (
 
 	"github.com/Dreamacro/clash/adapter/inbound"
 	"github.com/Dreamacro/clash/common/cmd"
-	"github.com/Dreamacro/clash/config"
+	"github.com/Dreamacro/clash/component/dialer"
+	"github.com/Dreamacro/clash/component/resolver"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/listener/tun/device"
 	"github.com/Dreamacro/clash/listener/tun/device/tun"
@@ -23,7 +25,12 @@ import (
 )
 
 // New TunAdapter
-func New(tunConf *config.Tun, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.PacketAdapter, tunChangeCallback C.TUNChangeCallback) (ipstack.Stack, error) {
+func New(
+	tunConf *C.Tun,
+	tcpIn chan<- C.ConnContext,
+	udpIn chan<- *inbound.PacketAdapter,
+	tunChangeCallback C.TUNChangeCallback,
+) (ipstack.Stack, error) {
 	var (
 		tunAddress = netip.Prefix{}
 		devName    = tunConf.Device
@@ -38,10 +45,28 @@ func New(tunConf *config.Tun, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.
 	)
 
 	defer func() {
-		if err != nil && tunDevice != nil {
-			_ = tunDevice.Close()
+		if err != nil {
+			if tunStack != nil {
+				_ = tunStack.Close()
+			} else if tunDevice != nil {
+				_ = tunDevice.Close()
+			}
 		}
 	}()
+
+	defaultInterface := dialer.DefaultInterface.Load()
+	if tunConf.AutoDetectInterface {
+		commons.SetTunChangeCallback(tunChangeCallback)
+		commons.StartDefaultInterfaceChangeMonitor()
+		if defaultInterface == "" {
+			commons.SetTunStatus(C.TunPaused)
+			return nil, nil
+		}
+	} else if defaultInterface == "" {
+		return nil, errors.New(
+			"default interface not found, please assign value to `interface-name` or enable `auto-detect-interface`",
+		)
+	}
 
 	if devName == "" {
 		devName = generateDeviceName()
@@ -96,9 +121,8 @@ func New(tunConf *config.Tun, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.
 		return nil, fmt.Errorf("setting interface address and routing failed: %w", err)
 	}
 
-	if tunConf.AutoDetectInterface {
-		commons.SetTunChangeCallback(tunChangeCallback)
-		go commons.StartDefaultInterfaceChangeMonitor()
+	if autoRoute {
+		resolver.DisableIPv6 = true
 	}
 
 	tunConf.Device = devName
@@ -106,13 +130,13 @@ func New(tunConf *config.Tun, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.
 
 	log.Info().
 		Str("iface", devName).
-		Str("gateway", tunAddress.Masked().Addr().Next().String()).
+		NetIPAddr("gateway", tunAddress.Masked().Addr().Next()).
 		Uint32("mtu", tunDevice.MTU()).
 		Int("batchSize", tunDevice.BatchSize()).
 		Bool("autoRoute", autoRoute).
 		Bool("autoDetectInterface", tunConf.AutoDetectInterface).
 		Str("ipStack", stackType.String()).
-		Msg("[Inbound] TUN listening")
+		Msg("[Inbound] tun listening")
 	return tunStack, nil
 }
 

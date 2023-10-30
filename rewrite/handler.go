@@ -11,17 +11,16 @@ import (
 	"strings"
 
 	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/listener/mitm"
 	"github.com/Dreamacro/clash/tunnel"
 )
 
-var _ mitm.Handler = (*RewriteHandler)(nil)
+var _ C.RewriteHandler = (*RewriteHandler)(nil)
 
 type RewriteHandler struct{}
 
-func (*RewriteHandler) HandleRequest(session *mitm.Session) (*http.Request, *http.Response) {
+func (*RewriteHandler) HandleRequest(session *C.MitmSession) (*http.Request, *http.Response) {
 	var (
-		request  = session.Request()
+		request  = session.Request
 		response *http.Response
 	)
 
@@ -100,10 +99,10 @@ func (*RewriteHandler) HandleRequest(session *mitm.Session) (*http.Request, *htt
 	return nil, nil
 }
 
-func (*RewriteHandler) HandleResponse(session *mitm.Session) *http.Response {
+func (*RewriteHandler) HandleResponse(session *C.MitmSession) *http.Response {
 	var (
-		request  = session.Request()
-		response = session.Response()
+		request  = session.Request
+		response = session.Response
 	)
 
 	rule, _, found := matchRewriteRule(request.URL.String(), false)
@@ -138,20 +137,20 @@ func (*RewriteHandler) HandleResponse(session *mitm.Session) *http.Response {
 			return nil
 		}
 
-		b, err := mitm.ReadDecompressedBody(response)
+		b, err := C.ReadDecompressedBody(response)
 		_ = response.Body.Close()
 		if err != nil {
 			return nil
 		}
 
-		body, err := mitm.DecodeLatin1(bytes.NewReader(b))
+		body, err := C.DecodeLatin1(bytes.NewReader(b))
 		if err != nil {
 			return nil
 		}
 
 		newBody := rule.ReplaceSubPayload(body)
 
-		modifiedBody, err := mitm.EncodeLatin1(newBody)
+		modifiedBody, err := C.EncodeLatin1(newBody)
 		if err != nil {
 			return nil
 		}
@@ -169,18 +168,19 @@ func (*RewriteHandler) HandleResponse(session *mitm.Session) *http.Response {
 	return nil
 }
 
-func (h *RewriteHandler) HandleApiRequest(*mitm.Session) bool {
+func (h *RewriteHandler) HandleApiRequest(*C.MitmSession) bool {
 	return false
 }
 
 // HandleError session maybe nil
-func (h *RewriteHandler) HandleError(*mitm.Session, error) {}
+func (h *RewriteHandler) HandleError(*C.MitmSession, error) {}
 
 func matchRewriteRule(url string, isRequest bool) (rr C.Rewrite, sub []string, found bool) {
 	rewrites := tunnel.Rewrites()
 	if isRequest {
 		found = rewrites.SearchInRequest(func(r C.Rewrite) bool {
-			sub = r.URLRegx().FindStringSubmatch(url)
+			// sub = r.URLRegx().FindStringSubmatch(url) // std
+			sub = findStringSubmatch(r.URLRegx(), url)
 			if len(sub) != 0 {
 				rr = r
 				return true
@@ -189,7 +189,8 @@ func matchRewriteRule(url string, isRequest bool) (rr C.Rewrite, sub []string, f
 		})
 	} else {
 		found = rewrites.SearchInResponse(func(r C.Rewrite) bool {
-			if r.URLRegx().FindString(url) != "" {
+			// if r.URLRegx().FindString(url) != "" { // std
+			if m, _ := r.URLRegx().MatchString(url); m {
 				rr = r
 				return true
 			}

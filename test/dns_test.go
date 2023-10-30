@@ -28,7 +28,7 @@ dns:
   enable: true
   listen: 0.0.0.0:8553
   nameserver:
-    - 119.29.29.29
+    - https://dns.alidns.com/dns-query
 `
 
 	err := parseAndApply(basic)
@@ -41,6 +41,9 @@ dns:
 	assert.NoError(t, err)
 	assert.NotEmptyf(t, rr, "record empty")
 
+	if len(rr) == 0 {
+		return
+	}
 	record := rr[0].(*dns.A)
 	assert.Equal(t, record.A.String(), "1.1.1.1")
 
@@ -63,7 +66,7 @@ dns:
   fake-ip-filter:
     - .sslip.io
   nameserver:
-    - 119.29.29.29
+    - https://dns.alidns.com/dns-query
 `
 
 	err := parseAndApply(basic)
@@ -89,6 +92,9 @@ dns:
 		assert.NoError(t, err)
 		assert.NotEmpty(t, rr)
 
+		if len(rr) == 0 {
+			continue
+		}
 		record := rr[0].(*dns.A)
 		assert.Equal(t, record.A.String(), pair.ip)
 	}
@@ -96,5 +102,8 @@ dns:
 	rr, err := exchange("127.0.0.1:8553", "2606-4700-4700--1111.sslip.io", dns.TypeAAAA)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, rr)
+	if len(rr) == 0 {
+		return
+	}
 	assert.Equal(t, rr[0].(*dns.AAAA).AAAA.String(), "2606:4700:4700::1111")
 }

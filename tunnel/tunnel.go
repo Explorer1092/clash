@@ -456,8 +456,7 @@ func handleUDPConn(packet *inbound.PacketAdapter) {
 
 	var (
 		fAddr netip.Addr // make a fAddr if request ip is fakeip
-		key   = packet.LocalAddr().String()
-		rKey  = key + metadata.RemoteAddress()
+		key   = packet.LocalAddr().String() + metadata.RemoteAddress()
 	)
 
 	if ip, err := netip.ParseAddr(metadata.Host); err == nil {
@@ -476,9 +475,10 @@ func handleUDPConn(packet *inbound.PacketAdapter) {
 	}
 
 	handle := func() bool {
-		pc := natTable.Get(key)
-		if pc != nil {
-			metadata.DstIP = addrTable.Get(rKey)
+		if pc, ok := natTable.Load(key); ok {
+			if metadata.DstIP, ok = addrTable.Load(key); !ok {
+				return false
+			}
 			_ = handleUDPToRemote(packet, pc, metadata)
 			return true
 		}
@@ -588,38 +588,32 @@ func handleUDPConn(packet *inbound.PacketAdapter) {
 		pCtx.InjectPacketConn(rawPc)
 		pc := statistic.NewUDPTracker(rawPc, statistic.DefaultManager, metadata, rule)
 
-		switch true {
+		switch e := log.Info(); e != nil {
 		case metadata.SpecialProxy != "":
-			if e := log.Info(); e != nil {
-				e.
-					EmbedObject(metadata).
-					Any("proxy", rawPc).
-					Msg("[UDP] tunnel connected")
-			}
+			e.
+				EmbedObject(metadata).
+				Any("proxy", rawPc).
+				Msg("[UDP] tunnel connected")
 		case rule != nil:
-			if e := log.Info(); e != nil {
-				e.
-					EmbedObject(metadata).
-					Any("mode", mode).
-					Any("rule", C.LogRule{R: rule}).
-					Any("proxy", rawPc).
-					Any("ruleGroup", rule.RuleGroups()).
-					Msg("[UDP] connected")
-			}
+			e.
+				EmbedObject(metadata).
+				Any("mode", mode).
+				Any("rule", C.LogRule{R: rule}).
+				Any("proxy", rawPc).
+				Any("ruleGroup", rule.RuleGroups()).
+				Msg("[UDP] connected")
 		default:
-			if e := log.Info(); e != nil {
-				e.
-					EmbedObject(metadata).
-					Any("mode", mode).
-					Any("proxy", rawPc).
-					Msg("[UDP] connected")
-			}
+			e.
+				EmbedObject(metadata).
+				Any("mode", mode).
+				Any("proxy", rawPc).
+				Msg("[UDP] connected")
 		}
 
 		oAddr := metadata.DstIP
-		go handleUDPToLocal(packet.UDPPacket, pc, key, rKey, oAddr, fAddr)
+		go handleUDPToLocal(packet.UDPPacket, pc, key, oAddr, fAddr)
 
-		addrTable.Set(rKey, oAddr)
+		addrTable.Set(key, oAddr)
 		natTable.Set(key, pc)
 		handle()
 	}()

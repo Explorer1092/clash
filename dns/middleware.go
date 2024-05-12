@@ -15,6 +15,8 @@ import (
 	"github.com/yaling888/clash/context"
 )
 
+var cnameCache *cache.LruCache[string, bool]
+
 type (
 	handler    func(ctx *context.DNSContext, r *D.Msg) (*D.Msg, error)
 	middleware func(next handler) handler
@@ -84,24 +86,36 @@ func withMapping(mapping *cache.LruCache[netip.Addr, string]) middleware {
 			}
 
 			host := strings.TrimSuffix(q.Name, ".")
-
+			_, isCNAME := cnameCache.Get(q.Name)
 			for _, ans := range msg.Answer {
-				var ip netip.Addr
-				var ttl uint32
+				var (
+					ip  netip.Addr
+					ttl uint32
+				)
 
 				switch a := ans.(type) {
 				case *D.A:
+					if isCNAME {
+						continue
+					}
 					ip, _ = netip.AddrFromSlice(a.A.To4())
 					ttl = a.Hdr.Ttl
 					if !ip.IsGlobalUnicast() {
 						continue
 					}
 				case *D.AAAA:
+					if isCNAME {
+						continue
+					}
 					ip, _ = netip.AddrFromSlice(a.AAAA)
 					ttl = a.Hdr.Ttl
 					if !ip.IsGlobalUnicast() {
 						continue
 					}
+				case *D.CNAME:
+					ttl = max(a.Hdr.Ttl, 2)
+					cnameCache.SetWithExpire(a.Target, true, time.Now().Add(time.Second*time.Duration(ttl)))
+					continue
 				default:
 					continue
 				}
@@ -201,6 +215,7 @@ func newHandler(resolver *Resolver, mapper *ResolverEnhancer) handler {
 	}
 
 	if mapper.mode != C.DNSNormal {
+		cnameCache = cache.New[string, bool](cache.WithSize[string, bool](2048))
 		middlewares = append(middlewares, withMapping(mapper.mapping))
 	}
 
